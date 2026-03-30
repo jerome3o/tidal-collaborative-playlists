@@ -89,6 +89,24 @@ async function refreshAccessToken(
 
 // ── Auth Routes ──────────────────────────────────────────────────────
 
+// Debug endpoint: shows what we'd send to Tidal (remove once auth works)
+app.get('/auth/debug', async (c) => {
+  const redirectUri = `${c.env.APP_URL}/auth/callback`;
+  return c.json({
+    message: 'Check these values against your Tidal developer app settings',
+    client_id: c.env.TIDAL_CLIENT_ID,
+    redirect_uri: redirectUri,
+    scopes: 'playlists.read playlists.write collection.read collection.write user.read',
+    authorize_url: `${c.env.TIDAL_AUTH_BASE}/authorize`,
+    app_url: c.env.APP_URL,
+    hints: [
+      'Ensure client_id matches your Tidal developer dashboard exactly',
+      'Ensure redirect_uri is registered in your Tidal app settings (exact match required, including trailing slash)',
+      'Ensure the scopes are enabled for your app in the Tidal dashboard',
+    ],
+  });
+});
+
 app.get('/auth/login', async (c) => {
   const codeVerifier = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
   const codeChallenge = await sha256Base64Url(codeVerifier);
