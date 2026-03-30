@@ -13,3 +13,4 @@ database_id = "faa2ee95-7a84-419f-8fdb-b7840e21d093"
 [vars]
 TIDAL_AUTH_BASE = "https://login.tidal.com"
 TIDAL_API_BASE = "https://openapi.tidal.com/v2"
+APP_URL = "https://tidal-collaborative-playlists.jeromeswannack.workers.dev"
