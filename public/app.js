@@ -1,0 +1,388 @@
+// ── State ─────────────────────────────────────────────────────────────
+let state = { loggedIn: false, userId: null };
+
+const $ = (sel) => document.querySelector(sel);
+const main = () => $('#main');
+const nav = () => $('#nav');
+
+// ── Router ───────────────────────────────────────────────────────────
+function getRoute() {
+  const hash = window.location.hash.slice(1) || '/';
+  return hash;
+}
+
+function navigate(path) {
+  window.location.hash = path;
+}
+
+window.addEventListener('hashchange', () => render());
+
+// ── API helpers ──────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const resp = await fetch(path, {
+    headers: { 'Content-Type': 'application/json', ...opts.headers },
+    ...opts,
+  });
+  if (resp.status === 401) {
+    state.loggedIn = false;
+    render();
+    return null;
+  }
+  return resp.json();
+}
+
+function toast(msg) {
+  let el = $('#toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    el.className = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+// ── Init ─────────────────────────────────────────────────────────────
+async function init() {
+  const me = await api('/auth/me');
+  if (me) {
+    state.loggedIn = me.loggedIn;
+    state.userId = me.userId;
+  }
+  render();
+}
+
+// ── Render ───────────────────────────────────────────────────────────
+function render() {
+  const route = getRoute();
+
+  // Nav
+  if (state.loggedIn) {
+    nav().innerHTML = `<a href="/auth/logout" class="btn btn-danger btn-small">Logout</a>`;
+  } else {
+    nav().innerHTML = '';
+  }
+
+  // Route matching
+  if (route.startsWith('/join/')) {
+    const shareId = route.split('/join/')[1];
+    renderJoin(shareId);
+  } else if (route.startsWith('/playlist/')) {
+    const playlistId = route.split('/playlist/')[1];
+    renderPlaylistDetail(playlistId);
+  } else if (route.startsWith('/shared/')) {
+    const shareId = route.split('/shared/')[1];
+    renderSharedDetail(shareId);
+  } else {
+    renderHome();
+  }
+}
+
+// ── Home ─────────────────────────────────────────────────────────────
+async function renderHome() {
+  if (!state.loggedIn) {
+    main().innerHTML = `
+      <div class="empty-state">
+        <h2>Tidal Collaborative Playlists</h2>
+        <p>Share and sync playlists with friends on Tidal</p>
+        <a href="/auth/login" class="btn btn-primary">Login with Tidal</a>
+      </div>
+    `;
+    return;
+  }
+
+  main().innerHTML = '<div class="loading">Loading your playlists...</div>';
+
+  // Load playlists and shares in parallel
+  const [playlistData, sharesData] = await Promise.all([
+    api('/api/tidal/userCollectionPlaylists/me/relationships/items?include=items&countryCode=US'),
+    api('/api/my-shares'),
+  ]);
+
+  let html = '';
+
+  // Shared playlists section
+  if (sharesData?.shares?.length > 0 || sharesData?.memberships?.length > 0) {
+    html += '<div class="section-title">Collaborative Playlists</div>';
+
+    for (const share of (sharesData.shares || [])) {
+      html += `
+        <div class="card" onclick="navigate('/shared/${share.id}')">
+          <h3>${escHtml(share.name || 'Untitled')} <span class="badge">Owner</span></h3>
+          <p>Playlist ID: ${share.tidal_playlist_id}</p>
+        </div>
+      `;
+    }
+
+    for (const mem of (sharesData.memberships || [])) {
+      html += `
+        <div class="card" onclick="navigate('/shared/${mem.shared_playlist_id}')">
+          <h3>${escHtml(mem.name || 'Untitled')} <span class="badge">Member</span></h3>
+          <p>Your copy: ${mem.their_playlist_id || 'pending'}</p>
+        </div>
+      `;
+    }
+  }
+
+  // Tidal playlists section
+  html += '<div class="section-title">Your Tidal Playlists</div>';
+
+  if (playlistData?.included) {
+    const playlists = playlistData.included.filter((r) => r.type === 'playlists');
+    if (playlists.length === 0) {
+      html += '<p style="color: var(--text-dim); padding: 12px 0;">No playlists found.</p>';
+    }
+    for (const pl of playlists) {
+      const attrs = pl.attributes || {};
+      html += `
+        <div class="card" onclick="navigate('/playlist/${pl.id}')">
+          <h3>${escHtml(attrs.name || 'Untitled')}</h3>
+          <p>${attrs.numberOfItems || 0} tracks${attrs.description ? ' · ' + escHtml(attrs.description) : ''}</p>
+        </div>
+      `;
+    }
+  } else if (playlistData?.data) {
+    // Fallback: items are in data array as relationships
+    const items = playlistData.data;
+    if (items.length === 0) {
+      html += '<p style="color: var(--text-dim); padding: 12px 0;">No playlists found.</p>';
+    }
+    for (const item of items) {
+      html += `
+        <div class="card" onclick="navigate('/playlist/${item.id}')">
+          <h3>Playlist</h3>
+          <p>ID: ${item.id}</p>
+        </div>
+      `;
+    }
+  } else {
+    html += '<p style="color: var(--text-dim); padding: 12px 0;">Could not load playlists. The API may require a different country code.</p>';
+  }
+
+  main().innerHTML = html;
+}
+
+// ── Playlist Detail ──────────────────────────────────────────────────
+async function renderPlaylistDetail(playlistId) {
+  main().innerHTML = '<div class="loading">Loading playlist...</div>';
+
+  const [plData, itemsData] = await Promise.all([
+    api(`/api/tidal/playlists/${playlistId}?countryCode=US`),
+    api(`/api/tidal/playlists/${playlistId}/relationships/items?include=items&countryCode=US`),
+  ]);
+
+  const attrs = plData?.data?.attributes || {};
+  const items = itemsData?.included || [];
+  const tracks = items.filter((i) => i.type === 'tracks');
+
+  let html = `
+    <button class="back-btn" onclick="navigate('/')">&larr; Back</button>
+    <h2>${escHtml(attrs.name || 'Playlist')}</h2>
+    <p style="color: var(--text-dim); margin-bottom: 16px;">
+      ${attrs.numberOfItems || tracks.length || 0} tracks
+      ${attrs.description ? ' · ' + escHtml(attrs.description) : ''}
+    </p>
+    <div class="card-actions" style="margin-bottom: 16px;">
+      <button class="btn btn-primary btn-small" onclick="sharePlaylist('${playlistId}', '${escAttr(attrs.name || 'Playlist')}')">
+        Share for Collaboration
+      </button>
+    </div>
+  `;
+
+  if (tracks.length > 0) {
+    html += '<ul class="track-list">';
+    tracks.forEach((track, i) => {
+      const ta = track.attributes || {};
+      html += `
+        <li>
+          <span class="track-num">${i + 1}</span>
+          <div class="track-info">
+            <div>${escHtml(ta.title || 'Unknown')}</div>
+          </div>
+        </li>
+      `;
+    });
+    html += '</ul>';
+  } else if (itemsData?.data?.length > 0) {
+    html += '<ul class="track-list">';
+    itemsData.data.forEach((item, i) => {
+      html += `
+        <li>
+          <span class="track-num">${i + 1}</span>
+          <div class="track-info">
+            <div>${item.type}: ${item.id}</div>
+          </div>
+        </li>
+      `;
+    });
+    html += '</ul>';
+  } else {
+    html += '<p style="color: var(--text-dim);">No tracks in this playlist.</p>';
+  }
+
+  main().innerHTML = html;
+}
+
+// ── Share a playlist ─────────────────────────────────────────────────
+async function sharePlaylist(playlistId, name) {
+  const result = await api('/api/share', {
+    method: 'POST',
+    body: JSON.stringify({ playlistId, name }),
+  });
+
+  if (result?.shareUrl) {
+    toast('Share link created!');
+    navigate(`/shared/${result.shareId}`);
+  } else {
+    toast('Failed to create share link');
+  }
+}
+// Expose to onclick
+window.sharePlaylist = sharePlaylist;
+
+// ── Shared Detail ────────────────────────────────────────────────────
+async function renderSharedDetail(shareId) {
+  main().innerHTML = '<div class="loading">Loading shared playlist...</div>';
+
+  const data = await api(`/api/share/${shareId}`);
+  if (!data?.shared) {
+    main().innerHTML = `
+      <button class="back-btn" onclick="navigate('/')">&larr; Back</button>
+      <div class="empty-state"><h2>Not found</h2><p>This shared playlist doesn't exist.</p></div>
+    `;
+    return;
+  }
+
+  const shareUrl = `${window.location.origin}/#/join/${shareId}`;
+  const members = data.members || [];
+
+  let html = `
+    <button class="back-btn" onclick="navigate('/')">&larr; Back</button>
+    <h2>${escHtml(data.shared.name || 'Shared Playlist')}</h2>
+    <p style="color: var(--text-dim); margin-bottom: 16px;">
+      Source playlist: ${data.shared.tidal_playlist_id}
+    </p>
+
+    <div class="section-title">Share Link</div>
+    <div class="share-link">
+      <input type="text" value="${escAttr(shareUrl)}" readonly id="share-url">
+      <button class="btn btn-secondary btn-small" onclick="copyShareLink()">Copy</button>
+    </div>
+
+    <div class="section-title">Members (${members.length})</div>
+  `;
+
+  if (members.length === 0) {
+    html += '<p style="color: var(--text-dim); padding: 8px 0;">No one has joined yet. Share the link above!</p>';
+  } else {
+    for (const m of members) {
+      html += `
+        <div class="card" style="cursor: default;">
+          <h3>User ${m.tidal_user_id || 'Unknown'}</h3>
+          <p>Their playlist copy: ${m.their_playlist_id || 'pending'}</p>
+        </div>
+      `;
+    }
+  }
+
+  html += `
+    <div style="margin-top: 16px;">
+      <button class="btn btn-primary" onclick="syncPlaylist('${shareId}')">Sync Now</button>
+    </div>
+  `;
+
+  main().innerHTML = html;
+}
+
+function copyShareLink() {
+  const input = $('#share-url');
+  if (input) {
+    navigator.clipboard.writeText(input.value).then(() => toast('Link copied!'));
+  }
+}
+window.copyShareLink = copyShareLink;
+
+async function syncPlaylist(shareId) {
+  toast('Syncing...');
+  const result = await api(`/api/share/${shareId}/sync`, { method: 'POST' });
+  if (result?.success) {
+    toast(`Synced ${result.itemCount} items!`);
+  } else {
+    toast(result?.error || 'Sync failed');
+  }
+}
+window.syncPlaylist = syncPlaylist;
+
+// ── Join ─────────────────────────────────────────────────────────────
+async function renderJoin(shareId) {
+  if (!state.loggedIn) {
+    main().innerHTML = `
+      <div class="join-hero">
+        <h2>You've been invited!</h2>
+        <p>Someone wants to share a Tidal playlist with you. Log in to join.</p>
+        <a href="/auth/login?redirect=${encodeURIComponent('/#/join/' + shareId)}" class="btn btn-primary">
+          Login with Tidal to Join
+        </a>
+      </div>
+    `;
+    return;
+  }
+
+  main().innerHTML = '<div class="loading">Joining playlist...</div>';
+
+  const data = await api(`/api/share/${shareId}`);
+  if (!data?.shared) {
+    main().innerHTML = `
+      <div class="empty-state">
+        <h2>Not found</h2>
+        <p>This shared playlist doesn't exist or has been removed.</p>
+        <button class="btn btn-secondary" onclick="navigate('/')">Go Home</button>
+      </div>
+    `;
+    return;
+  }
+
+  main().innerHTML = `
+    <div class="join-hero">
+      <h2>${escHtml(data.shared.name || 'Shared Playlist')}</h2>
+      <p>Join this collaborative playlist to get a synced copy in your Tidal library.</p>
+      <button class="btn btn-primary" onclick="doJoin('${shareId}')">Join & Create Copy</button>
+      <br><br>
+      <button class="btn btn-secondary" onclick="navigate('/')">Cancel</button>
+    </div>
+  `;
+}
+
+async function doJoin(shareId) {
+  main().innerHTML = '<div class="loading">Creating your copy...</div>';
+  const result = await api(`/api/share/${shareId}/join`, { method: 'POST' });
+  if (result?.success) {
+    toast('Joined! A copy has been created in your Tidal library.');
+    navigate(`/shared/${shareId}`);
+  } else {
+    toast(result?.error || 'Failed to join');
+    navigate('/');
+  }
+}
+window.doJoin = doJoin;
+
+// ── Helpers ──────────────────────────────────────────────────────────
+function escHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function escAttr(str) {
+  return str.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ── PWA ──────────────────────────────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+
+// ── Boot ─────────────────────────────────────────────────────────────
+init();

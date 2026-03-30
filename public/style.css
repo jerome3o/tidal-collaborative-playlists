@@ -1,0 +1,207 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0f0f0f;
+  --surface: #1a1a1a;
+  --surface2: #252525;
+  --text: #e8e8e8;
+  --text-dim: #888;
+  --accent: #1db954;
+  --accent-hover: #1ed760;
+  --danger: #e74c3c;
+  --radius: 8px;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100dvh;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--surface2);
+}
+
+header h1 {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+nav { display: flex; gap: 12px; align-items: center; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.15s;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #000;
+}
+.btn-primary:hover { background: var(--accent-hover); }
+
+.btn-secondary {
+  background: var(--surface2);
+  color: var(--text);
+}
+.btn-secondary:hover { background: #333; }
+
+.btn-danger {
+  background: transparent;
+  color: var(--danger);
+  padding: 8px 12px;
+}
+
+.btn-small { padding: 6px 12px; font-size: 0.8rem; }
+
+.card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.card:hover { background: var(--surface2); }
+
+.card h3 { font-size: 1rem; margin-bottom: 4px; }
+.card p { font-size: 0.85rem; color: var(--text-dim); }
+
+.card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 48px 16px;
+  color: var(--text-dim);
+}
+.empty-state h2 { font-size: 1.5rem; margin-bottom: 8px; color: var(--text); }
+.empty-state p { margin-bottom: 24px; }
+
+.loading {
+  text-align: center;
+  padding: 48px;
+  color: var(--text-dim);
+}
+
+.share-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface2);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-top: 12px;
+  word-break: break-all;
+  font-size: 0.85rem;
+}
+
+.share-link input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 0.85rem;
+  outline: none;
+}
+
+.track-list {
+  list-style: none;
+}
+
+.track-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--surface2);
+  font-size: 0.9rem;
+}
+
+.track-list li .track-num {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  width: 24px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.track-list li .track-info { flex: 1; }
+.track-list li .track-artist { color: var(--text-dim); font-size: 0.8rem; }
+
+.section-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  margin: 24px 0 12px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: var(--accent);
+  color: #000;
+}
+
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface2);
+  color: var(--text);
+  padding: 12px 24px;
+  border-radius: var(--radius);
+  font-size: 0.875rem;
+  z-index: 100;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.toast.show { opacity: 1; }
+
+.back-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 4px 0;
+  margin-bottom: 16px;
+}
+.back-btn:hover { color: var(--text); }
+
+.join-hero {
+  text-align: center;
+  padding: 32px 0;
+}
+.join-hero h2 { margin-bottom: 8px; }
+.join-hero p { color: var(--text-dim); margin-bottom: 24px; }

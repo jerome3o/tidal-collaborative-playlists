@@ -1,0 +1,16 @@
+{
+  "name": "Tidal Collaborative Playlists",
+  "short_name": "Tidal Collab",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f0f0f",
+  "theme_color": "#0f0f0f",
+  "description": "Share and sync Tidal playlists with friends",
+  "icons": [
+    {
+      "src": "/icon-192.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

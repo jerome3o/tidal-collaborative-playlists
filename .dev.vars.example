@@ -1,0 +1,4 @@
+# Copy to .dev.vars and fill in your values
+TIDAL_CLIENT_ID=your-tidal-client-id
+TIDAL_CLIENT_SECRET=your-tidal-client-secret
+APP_URL=http://localhost:8787
