@@ -1,5 +1,6 @@
 // ── State ─────────────────────────────────────────────────────────────
 let state = { loggedIn: false, userId: null };
+let syncPollTimer = null;
 
 const $ = (sel) => document.querySelector(sel);
 const main = () => $('#main');
@@ -15,7 +16,14 @@ function navigate(path) {
   window.location.hash = path;
 }
 
-window.addEventListener('hashchange', () => render());
+window.addEventListener('hashchange', () => {
+  // Clear any polling timer when navigating away
+  if (syncPollTimer) {
+    clearInterval(syncPollTimer);
+    syncPollTimer = null;
+  }
+  render();
+});
 
 // ── API helpers ──────────────────────────────────────────────────────
 async function api(path, opts = {}) {
@@ -288,12 +296,36 @@ async function renderSharedDetail(shareId) {
   }
 
   html += `
-    <div style="margin-top: 16px;">
+    <div style="margin-top: 16px; display: flex; align-items: center; gap: 12px;">
       <button class="btn btn-primary" onclick="syncPlaylist('${shareId}')">Sync Now</button>
+      <span id="auto-sync-status" style="color: var(--text-dim); font-size: 0.8rem;">Auto-sync every 3 min</span>
     </div>
+    <div id="last-sync" style="color: var(--text-dim); font-size: 0.8rem; margin-top: 8px;"></div>
   `;
 
   main().innerHTML = html;
+
+  // Start auto-polling every 3 minutes while viewing this page
+  if (syncPollTimer) clearInterval(syncPollTimer);
+  updateSyncTimestamp();
+  syncPollTimer = setInterval(async () => {
+    const statusEl = $('#auto-sync-status');
+    if (statusEl) statusEl.textContent = 'Syncing...';
+    const result = await api(`/api/share/${shareId}/sync`, { method: 'POST' });
+    if (statusEl) {
+      if (result?.success) {
+        statusEl.textContent = `Auto-synced ${result.itemCount} items`;
+      } else {
+        statusEl.textContent = 'Auto-sync: ' + (result?.error || 'failed');
+      }
+    }
+    updateSyncTimestamp();
+  }, 3 * 60 * 1000);
+}
+
+function updateSyncTimestamp() {
+  const el = $('#last-sync');
+  if (el) el.textContent = `Last checked: ${new Date().toLocaleTimeString()}`;
 }
 
 function copyShareLink() {
