@@ -22,10 +22,10 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
+        run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Print deployment URL
+        run: echo "Deployed! Your app should be live at https://tidal-collaborative-playlists.${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.workers.dev (or your custom domain)"
