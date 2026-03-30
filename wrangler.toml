@@ -13,3 +13,4 @@ database_id = "placeholder-replace-after-creation"
 [vars]
 TIDAL_AUTH_BASE = "https://login.tidal.com"
 TIDAL_API_BASE = "https://openapi.tidal.com/v2"
+APP_URL = "https://tidal-collaborative-playlists.jeromeswannack.workers.dev"
