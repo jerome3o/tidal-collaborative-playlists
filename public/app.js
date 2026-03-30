@@ -74,7 +74,10 @@ function render() {
   }
 
   // Route matching
-  if (route.startsWith('/join/')) {
+  if (route.startsWith('/comments/')) {
+    const parts = route.split('/comments/')[1].split('/');
+    renderCommentThread(parts[0], parts[1]);
+  } else if (route.startsWith('/join/')) {
     const shareId = route.split('/join/')[1];
     renderJoin(shareId);
   } else if (route.startsWith('/playlist/')) {
@@ -341,7 +344,7 @@ async function renderSharedDetail(shareId) {
   main().innerHTML = html;
 
   // Load tracks
-  loadSharedPlaylistTracks(tidalPlaylistId);
+  loadSharedPlaylistTracks(tidalPlaylistId, shareId);
 
   // Start auto-polling every 3 minutes while viewing this page
   if (syncPollTimer) clearInterval(syncPollTimer);
@@ -361,29 +364,49 @@ async function renderSharedDetail(shareId) {
   }, 3 * 60 * 1000);
 }
 
-async function loadSharedPlaylistTracks(tidalPlaylistId) {
+const QUICK_EMOJIS = ['🔥', '❤️', '🎶', '👀', '🤯', '😂', '💀', '🙌'];
+
+async function loadSharedPlaylistTracks(tidalPlaylistId, shareId) {
   const container = $('#track-list');
   if (!container) return;
 
-  const itemsData = await api(`/api/tidal/playlists/${tidalPlaylistId}/relationships/items?include=items&countryCode=US`);
+  // Load tracks, reactions, and comment counts in parallel
+  const [itemsData, reactionsData, commentCountsData] = await Promise.all([
+    api(`/api/tidal/playlists/${tidalPlaylistId}/relationships/items?include=items&countryCode=US`),
+    api(`/api/share/${shareId}/reactions`),
+    api(`/api/share/${shareId}/comment-counts`),
+  ]);
 
   if (!itemsData) {
     container.innerHTML = '<p style="color: var(--text-dim);">Could not load tracks.</p>';
     return;
   }
 
-  // included contains the full track/video objects with attributes
-  const included = itemsData.included || [];
-  // data contains the relationship items in playlist order
-  const orderedIds = (itemsData.data || []).map((item) => `${item.type}:${item.id}`);
+  // Build reaction lookup: { trackId: { emoji: count } }
+  const reactionsByTrack = {};
+  for (const r of (reactionsData?.reactions || [])) {
+    if (!reactionsByTrack[r.track_id]) reactionsByTrack[r.track_id] = {};
+    reactionsByTrack[r.track_id][r.emoji] = r.count;
+  }
+  // My reactions: { trackId: Set(emoji) }
+  const myReactionsByTrack = {};
+  for (const r of (reactionsData?.myReactions || [])) {
+    if (!myReactionsByTrack[r.track_id]) myReactionsByTrack[r.track_id] = new Set();
+    myReactionsByTrack[r.track_id].add(r.emoji);
+  }
+  // Comment counts: { trackId: count }
+  const commentCounts = {};
+  for (const c of (commentCountsData?.counts || [])) {
+    commentCounts[c.track_id] = c.count;
+  }
 
-  // Build a lookup map from included resources
+  const included = itemsData.included || [];
+  const orderedIds = (itemsData.data || []).map((item) => `${item.type}:${item.id}`);
   const resourceMap = {};
   for (const res of included) {
     resourceMap[`${res.type}:${res.id}`] = res;
   }
 
-  // Get items in playlist order, falling back to included order
   let items;
   if (orderedIds.length > 0) {
     items = orderedIds.map((key) => resourceMap[key]).filter(Boolean);
@@ -404,8 +427,10 @@ async function loadSharedPlaylistTracks(tidalPlaylistId) {
     const isTrack = item.type === 'tracks';
     const tidalUrl = `https://tidal.com/browse/${isTrack ? 'track' : 'video'}/${item.id}`;
     const duration = attrs.duration ? formatDuration(attrs.duration) : '';
+    const trackReactions = reactionsByTrack[item.id] || {};
+    const myReactions = myReactionsByTrack[item.id] || new Set();
+    const numComments = commentCounts[item.id] || 0;
 
-    // Get artist names from relationships if available
     let artistNames = '';
     const artistRels = item.relationships?.artists?.data;
     if (artistRels) {
@@ -416,16 +441,34 @@ async function loadSharedPlaylistTracks(tidalPlaylistId) {
       artistNames = names.join(', ');
     }
 
+    // Reaction buttons
+    let reactionsHtml = '';
+    const seenEmojis = new Set();
+    for (const [emoji, count] of Object.entries(trackReactions)) {
+      seenEmojis.add(emoji);
+      const active = myReactions.has(emoji) ? 'active' : '';
+      reactionsHtml += `<button class="reaction-btn ${active}" onclick="toggleReaction('${shareId}','${item.id}','${emoji}')">${emoji} <span class="count">${count}</span></button>`;
+    }
+    reactionsHtml += `<button class="add-reaction-btn" onclick="showEmojiPicker(this,'${shareId}','${item.id}')">+</button>`;
+
     html += `
-      <li>
-        <a href="${tidalUrl}" target="_blank" style="display: flex; align-items: center; gap: 12px; text-decoration: none; color: inherit; flex: 1;">
-          <span class="track-num">${i + 1}</span>
-          <div class="track-info">
-            <div>${escHtml(title)}${escHtml(version)}</div>
-            ${artistNames ? `<div class="track-artist">${escHtml(artistNames)}</div>` : ''}
-          </div>
-          ${duration ? `<span style="color: var(--text-dim); font-size: 0.8rem; flex-shrink: 0;">${duration}</span>` : ''}
-        </a>
+      <li data-track-id="${item.id}">
+        <div class="track-row">
+          <a href="${tidalUrl}" target="_blank" style="display: flex; align-items: center; gap: 12px; text-decoration: none; color: inherit; flex: 1;">
+            <span class="track-num">${i + 1}</span>
+            <div class="track-info">
+              <div>${escHtml(title)}${escHtml(version)}</div>
+              ${artistNames ? `<div class="track-artist">${escHtml(artistNames)}</div>` : ''}
+            </div>
+            ${duration ? `<span style="color: var(--text-dim); font-size: 0.8rem; flex-shrink: 0;">${duration}</span>` : ''}
+          </a>
+          <button class="comment-badge" onclick="navigate('/comments/${shareId}/${item.id}')">
+            💬 ${numComments || ''}
+          </button>
+        </div>
+        <div class="track-reactions" id="reactions-${item.id}">
+          ${reactionsHtml}
+        </div>
       </li>
     `;
   });
@@ -444,6 +487,190 @@ function formatDuration(iso) {
   if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   return `${m}:${String(s).padStart(2, '0')}`;
 }
+
+// ── Reactions ────────────────────────────────────────────────────────
+
+async function toggleReaction(shareId, trackId, emoji) {
+  const result = await api(`/api/share/${shareId}/reactions`, {
+    method: 'POST',
+    body: JSON.stringify({ trackId, emoji }),
+  });
+  if (result) {
+    // Refresh just the reactions for this track
+    refreshTrackReactions(shareId, trackId);
+  }
+}
+window.toggleReaction = toggleReaction;
+
+function showEmojiPicker(btn, shareId, trackId) {
+  // Close any existing picker
+  const existing = document.querySelector('.emoji-picker');
+  if (existing) existing.remove();
+
+  const picker = document.createElement('div');
+  picker.className = 'emoji-picker';
+  QUICK_EMOJIS.forEach((emoji) => {
+    const b = document.createElement('button');
+    b.textContent = emoji;
+    b.onclick = (e) => {
+      e.stopPropagation();
+      picker.remove();
+      toggleReaction(shareId, trackId, emoji);
+    };
+    picker.appendChild(b);
+  });
+
+  // Position relative to button
+  btn.parentElement.style.position = 'relative';
+  btn.parentElement.appendChild(picker);
+
+  // Close on click outside
+  setTimeout(() => {
+    const close = (e) => {
+      if (!picker.contains(e.target)) {
+        picker.remove();
+        document.removeEventListener('click', close);
+      }
+    };
+    document.addEventListener('click', close);
+  }, 0);
+}
+window.showEmojiPicker = showEmojiPicker;
+
+async function refreshTrackReactions(shareId, trackId) {
+  const reactionsData = await api(`/api/share/${shareId}/reactions`);
+  if (!reactionsData) return;
+
+  const container = document.getElementById(`reactions-${trackId}`);
+  if (!container) return;
+
+  const trackReactions = {};
+  for (const r of (reactionsData.reactions || [])) {
+    if (r.track_id === trackId) {
+      trackReactions[r.emoji] = r.count;
+    }
+  }
+  const myReactions = new Set();
+  for (const r of (reactionsData.myReactions || [])) {
+    if (r.track_id === trackId) myReactions.add(r.emoji);
+  }
+
+  let html = '';
+  for (const [emoji, count] of Object.entries(trackReactions)) {
+    const active = myReactions.has(emoji) ? 'active' : '';
+    html += `<button class="reaction-btn ${active}" onclick="toggleReaction('${shareId}','${trackId}','${emoji}')">${emoji} <span class="count">${count}</span></button>`;
+  }
+  html += `<button class="add-reaction-btn" onclick="showEmojiPicker(this,'${shareId}','${trackId}')">+</button>`;
+  container.innerHTML = html;
+}
+
+// ── Comments ─────────────────────────────────────────────────────────
+
+// Store display name in localStorage so user only sets it once
+function getDisplayName() {
+  return localStorage.getItem('displayName') || '';
+}
+function setDisplayName(name) {
+  localStorage.setItem('displayName', name);
+}
+
+async function renderCommentThread(shareId, trackId) {
+  main().innerHTML = '<div class="loading">Loading comments...</div>';
+
+  const [commentsData, trackData] = await Promise.all([
+    api(`/api/share/${shareId}/comments/${trackId}`),
+    api(`/api/tidal/tracks/${trackId}?countryCode=US`),
+  ]);
+
+  const trackName = trackData?.data?.attributes?.title || 'Track';
+  const comments = commentsData?.comments || [];
+
+  let html = `
+    <button class="back-btn" onclick="navigate('/shared/${shareId}')">&larr; Back to playlist</button>
+    <h2>${escHtml(trackName)}</h2>
+    <a href="https://tidal.com/browse/track/${trackId}" target="_blank" style="color: var(--accent); font-size: 0.85rem; text-decoration: none;">Open in Tidal</a>
+    <div class="section-title">Comments (${comments.length})</div>
+    <ul class="comment-list" id="comment-list">
+  `;
+
+  if (comments.length === 0) {
+    html += '<p style="color: var(--text-dim); padding: 12px 0;">No comments yet. Be the first!</p>';
+  }
+
+  for (const c of comments) {
+    const time = new Date(c.created_at * 1000).toLocaleString();
+    const name = c.display_name || 'Anonymous';
+    html += `
+      <li class="comment-item">
+        <div class="comment-meta">
+          <span>${escHtml(name)}</span>
+          <span>${time}${c.isMe ? ` <button class="comment-delete" onclick="deleteComment('${shareId}','${trackId}',${c.id})">delete</button>` : ''}</span>
+        </div>
+        <div class="comment-body">${escHtml(c.body)}</div>
+      </li>
+    `;
+  }
+
+  html += '</ul>';
+
+  const savedName = getDisplayName();
+  html += `
+    <div class="comment-form" id="comment-form">
+      ${!savedName ? `<input type="text" id="comment-name" placeholder="Your name" style="max-width: 100px;">` : ''}
+      <input type="text" id="comment-input" placeholder="Write a comment..." autocomplete="off">
+      <button class="btn btn-primary btn-small" onclick="postComment('${shareId}','${trackId}')">Send</button>
+    </div>
+  `;
+
+  main().innerHTML = html;
+
+  // Allow Enter key to submit
+  const input = document.getElementById('comment-input');
+  if (input) {
+    input.focus();
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') postComment(shareId, trackId);
+    });
+  }
+}
+
+async function postComment(shareId, trackId) {
+  const input = document.getElementById('comment-input');
+  const nameInput = document.getElementById('comment-name');
+  const body = input?.value?.trim();
+  if (!body) return;
+
+  let displayName = getDisplayName();
+  if (nameInput) {
+    displayName = nameInput.value.trim() || 'Anonymous';
+    setDisplayName(displayName);
+  }
+
+  input.value = '';
+  const result = await api(`/api/share/${shareId}/comments/${trackId}`, {
+    method: 'POST',
+    body: JSON.stringify({ body, displayName }),
+  });
+
+  if (result?.success) {
+    renderCommentThread(shareId, trackId);
+  } else {
+    toast('Failed to post comment');
+  }
+}
+window.postComment = postComment;
+
+async function deleteComment(shareId, trackId, commentId) {
+  const result = await api(`/api/share/${shareId}/comments/${trackId}/${commentId}`, {
+    method: 'DELETE',
+  });
+  if (result?.success) {
+    renderCommentThread(shareId, trackId);
+  } else {
+    toast(result?.error || 'Failed to delete');
+  }
+}
+window.deleteComment = deleteComment;
 
 function updateSyncTimestamp() {
   const el = $('#last-sync');
