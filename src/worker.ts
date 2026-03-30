@@ -154,12 +154,29 @@ async function syncAllPlaylists(
     }
 
     const members = await db
-      .prepare('SELECT pm.*, s.* FROM playlist_members pm JOIN sessions s ON pm.session_id = s.id WHERE pm.shared_playlist_id = ?')
+      .prepare(
+        `SELECT pm.shared_playlist_id, pm.session_id, pm.their_playlist_id,
+                s.id as s_id, s.tidal_user_id, s.access_token, s.refresh_token,
+                s.token_expires_at, s.created_at as s_created_at, s.updated_at as s_updated_at
+         FROM playlist_members pm
+         JOIN sessions s ON pm.session_id = s.id
+         WHERE pm.shared_playlist_id = ?`,
+      )
       .bind(shared.id)
       .all();
 
     for (const member of members.results) {
       if (!member.their_playlist_id) continue;
+
+      const memberSession = {
+        id: member.s_id,
+        tidal_user_id: member.tidal_user_id,
+        access_token: member.access_token,
+        refresh_token: member.refresh_token,
+        token_expires_at: member.token_expires_at,
+        created_at: member.s_created_at,
+        updated_at: member.s_updated_at,
+      };
 
       const result = await syncPlaylistForMember(
         db,
@@ -168,7 +185,7 @@ async function syncAllPlaylists(
         clientSecret,
         shared.tidal_playlist_id as string,
         ownerSession as Record<string, unknown>,
-        member as Record<string, unknown>,
+        memberSession as Record<string, unknown>,
         member.their_playlist_id as string,
       );
 
@@ -645,6 +662,47 @@ app.get('/api/my-shares', async (c) => {
     .all();
 
   return c.json({ shares: shares.results, memberships: memberships.results });
+});
+
+// ── Debug / diagnostic endpoint ──────────────────────────────────────
+
+app.get('/api/debug/share/:id', async (c) => {
+  const shareId = c.req.param('id');
+  const sessionId = getCookie(c, 'session');
+
+  const shared = await c.env.DB.prepare('SELECT * FROM shared_playlists WHERE id = ?')
+    .bind(shareId)
+    .first();
+
+  if (!shared) return c.json({ error: 'Shared playlist not found' }, 404);
+
+  const ownerSession = await c.env.DB.prepare('SELECT id, tidal_user_id, token_expires_at FROM sessions WHERE id = ?')
+    .bind(shared.owner_session_id)
+    .first();
+
+  const members = await c.env.DB.prepare(
+    `SELECT pm.session_id, pm.their_playlist_id, s.tidal_user_id, s.token_expires_at
+     FROM playlist_members pm
+     JOIN sessions s ON pm.session_id = s.id
+     WHERE pm.shared_playlist_id = ?`,
+  )
+    .bind(shareId)
+    .all();
+
+  const now = Math.floor(Date.now() / 1000);
+
+  return c.json({
+    shared,
+    currentSessionId: sessionId,
+    ownerSession: ownerSession
+      ? { ...ownerSession, tokenExpired: (ownerSession.token_expires_at as number) < now }
+      : null,
+    members: members.results.map((m) => ({
+      ...m,
+      tokenExpired: (m.token_expires_at as number) < now,
+      isCurrentUser: m.session_id === sessionId,
+    })),
+  });
 });
 
 // ── Sync status endpoint (for frontend polling) ─────────────────────
