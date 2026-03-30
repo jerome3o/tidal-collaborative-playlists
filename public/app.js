@@ -301,6 +301,9 @@ async function renderSharedDetail(shareId) {
       <span id="auto-sync-status" style="color: var(--text-dim); font-size: 0.8rem;">Auto-sync every 3 min</span>
     </div>
     <div id="last-sync" style="color: var(--text-dim); font-size: 0.8rem; margin-top: 8px;"></div>
+    <div style="margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--surface2);">
+      <button class="btn btn-danger btn-small" onclick="deleteShare('${shareId}')">Delete Shared Playlist</button>
+    </div>
   `;
 
   main().innerHTML = html;
@@ -346,6 +349,18 @@ async function syncPlaylist(shareId) {
   }
 }
 window.syncPlaylist = syncPlaylist;
+
+async function deleteShare(shareId) {
+  if (!confirm('Delete this shared playlist? Members will keep their copies but syncing will stop.')) return;
+  const result = await api(`/api/share/${shareId}`, { method: 'DELETE' });
+  if (result?.success) {
+    toast('Shared playlist deleted');
+    navigate('/');
+  } else {
+    toast(result?.error || 'Failed to delete');
+  }
+}
+window.deleteShare = deleteShare;
 
 // ── Join ─────────────────────────────────────────────────────────────
 async function renderJoin(shareId) {

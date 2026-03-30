@@ -558,6 +558,18 @@ app.post('/api/share', async (c) => {
   }
 
   const { playlistId, name } = await c.req.json<{ playlistId: string; name: string }>();
+
+  // Check if this playlist is already shared
+  const existing = await c.env.DB.prepare(
+    'SELECT id FROM shared_playlists WHERE tidal_playlist_id = ?',
+  )
+    .bind(playlistId)
+    .first<{ id: string }>();
+
+  if (existing) {
+    return c.json({ shareId: existing.id, shareUrl: `${c.env.APP_URL}/#/shared/${existing.id}` });
+  }
+
   const shareId = generateId().slice(0, 12);
 
   await c.env.DB.prepare(
@@ -566,7 +578,32 @@ app.post('/api/share', async (c) => {
     .bind(shareId, playlistId, sessionId, name, Math.floor(Date.now() / 1000))
     .run();
 
-  return c.json({ shareId, shareUrl: `${c.env.APP_URL}/join/${shareId}` });
+  return c.json({ shareId, shareUrl: `${c.env.APP_URL}/#/shared/${shareId}` });
+});
+
+app.delete('/api/share/:id', async (c) => {
+  const shareId = c.req.param('id');
+  const sessionId = getCookie(c, 'session');
+
+  const shared = await c.env.DB.prepare('SELECT * FROM shared_playlists WHERE id = ?')
+    .bind(shareId)
+    .first();
+
+  if (!shared) {
+    return c.json({ error: 'Not found' }, 404);
+  }
+
+  if (shared.owner_session_id !== sessionId) {
+    return c.json({ error: 'Only the owner can delete a shared playlist' }, 403);
+  }
+
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM playlist_members WHERE shared_playlist_id = ?').bind(shareId),
+    c.env.DB.prepare('DELETE FROM shared_playlists WHERE id = ?').bind(shareId),
+  ]);
+
+  console.log(`[share] Deleted shared playlist ${shareId}`);
+  return c.json({ success: true });
 });
 
 app.get('/api/share/:id', async (c) => {

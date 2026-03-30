@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- Shared playlists: track which playlists are shared for collaboration
 CREATE TABLE IF NOT EXISTS shared_playlists (
   id TEXT PRIMARY KEY,
-  tidal_playlist_id TEXT NOT NULL,
+  tidal_playlist_id TEXT NOT NULL UNIQUE,
   owner_session_id TEXT NOT NULL,
   name TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
