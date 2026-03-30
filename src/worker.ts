@@ -1003,7 +1003,23 @@ app.delete('/api/share/:id/comments/:trackId/:commentId', async (c) => {
   return c.json({ success: true });
 });
 
-// ── Debug / diagnostic endpoint ──────────────────────────────────────
+// ── Debug / diagnostic endpoints ─────────────────────────────────────
+
+// Public: show all shared playlists and sessions (no secrets)
+app.get('/api/debug/state', async (c) => {
+  const shares = await c.env.DB.prepare('SELECT id, tidal_playlist_id, owner_session_id, owner_tidal_user_id, name, created_at FROM shared_playlists').all();
+  const members = await c.env.DB.prepare('SELECT shared_playlist_id, session_id, tidal_user_id, their_playlist_id, joined_at FROM playlist_members').all();
+  const sessions = await c.env.DB.prepare('SELECT id, tidal_user_id, display_name, token_expires_at, created_at, updated_at FROM sessions').all();
+  const now = Math.floor(Date.now() / 1000);
+  return c.json({
+    shares: shares.results,
+    members: members.results,
+    sessions: sessions.results.map((s) => ({
+      ...s,
+      tokenExpired: (s.token_expires_at as number) < now,
+    })),
+  });
+});
 
 app.get('/api/debug/share/:id', async (c) => {
   const shareId = c.req.param('id');
