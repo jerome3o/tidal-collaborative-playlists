@@ -1,5 +1,5 @@
 // ── State ─────────────────────────────────────────────────────────────
-let state = { loggedIn: false, userId: null };
+let state = { loggedIn: false, userId: null, displayName: null };
 let syncPollTimer = null;
 
 const $ = (sel) => document.querySelector(sel);
@@ -58,6 +58,11 @@ async function init() {
   if (me) {
     state.loggedIn = me.loggedIn;
     state.userId = me.userId;
+    state.displayName = me.displayName;
+    // Auto-set display name for comments from Tidal profile
+    if (me.displayName && !getDisplayName()) {
+      setDisplayName(me.displayName);
+    }
   }
   render();
 }
@@ -320,8 +325,8 @@ async function renderSharedDetail(shareId) {
     for (const m of members) {
       html += `
         <div class="card" style="cursor: default;">
-          <h3>User ${m.tidal_user_id || 'Unknown'}</h3>
-          <p>Their playlist copy: ${m.their_playlist_id || 'pending'}</p>
+          <h3>${escHtml(m.display_name || 'User ' + (m.tidal_user_id || 'Unknown'))}</h3>
+          <p>Playlist copy: ${m.their_playlist_id || 'pending'}</p>
         </div>
       `;
     }
