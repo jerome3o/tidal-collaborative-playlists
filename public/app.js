@@ -319,6 +319,9 @@ async function renderSharedDetail(shareId) {
     <div class="section-title">Members (${members.length})</div>
   `;
 
+  // Check if the current user is a member (to show rejoin option)
+  const isMember = members.some(m => m.tidal_user_id === state.userId);
+
   if (members.length === 0) {
     html += '<p style="color: var(--text-dim); padding: 8px 0;">No one has joined yet. Share the link above!</p>';
   } else {
@@ -330,6 +333,15 @@ async function renderSharedDetail(shareId) {
         </div>
       `;
     }
+  }
+
+  if (isMember) {
+    html += `
+      <p style="margin-top: 8px;">
+        <button class="btn btn-secondary btn-small" onclick="doJoin('${shareId}')">Rejoin (new copy)</button>
+        <span style="color: var(--text-dim); font-size: 0.8rem; margin-left: 8px;">Use if your synced playlist was deleted from Tidal</span>
+      </p>
+    `;
   }
 
   html += `
@@ -742,11 +754,16 @@ async function renderJoin(shareId) {
     return;
   }
 
+  const alreadyMember = (data.members || []).some(m => m.tidal_user_id === state.userId);
+
   main().innerHTML = `
     <div class="join-hero">
       <h2>${escHtml(data.shared.name || 'Shared Playlist')}</h2>
-      <p>Join this collaborative playlist to get a synced copy in your Tidal library.</p>
-      <button class="btn btn-primary" onclick="doJoin('${shareId}')">Join & Create Copy</button>
+      ${alreadyMember
+        ? '<p>You\'re already a member. Rejoin to create a fresh synced copy (e.g. if you deleted the old one).</p>'
+        : '<p>Join this collaborative playlist to get a synced copy in your Tidal library.</p>'
+      }
+      <button class="btn btn-primary" onclick="doJoin('${shareId}')">${alreadyMember ? 'Rejoin & Create New Copy' : 'Join & Create Copy'}</button>
       <br><br>
       <button class="btn btn-secondary" onclick="navigate('/')">Cancel</button>
     </div>
