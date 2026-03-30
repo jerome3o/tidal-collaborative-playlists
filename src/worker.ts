@@ -827,6 +827,140 @@ app.get('/api/my-shares', async (c) => {
   return c.json({ shares: shares.results, memberships: memberships.results });
 });
 
+// ── Reactions ────────────────────────────────────────────────────────
+
+// Get all reactions for all tracks in a shared playlist
+app.get('/api/share/:id/reactions', async (c) => {
+  const shareId = c.req.param('id');
+  const result = await c.env.DB.prepare(
+    'SELECT track_id, emoji, COUNT(*) as count FROM reactions WHERE shared_playlist_id = ? GROUP BY track_id, emoji',
+  )
+    .bind(shareId)
+    .all();
+
+  // Also get the current user's reactions
+  const sessionId = getCookie(c, 'session');
+  let myReactions: Record<string, unknown>[] = [];
+  if (sessionId) {
+    const myResult = await c.env.DB.prepare(
+      'SELECT track_id, emoji FROM reactions WHERE shared_playlist_id = ? AND session_id = ?',
+    )
+      .bind(shareId, sessionId)
+      .all();
+    myReactions = myResult.results;
+  }
+
+  return c.json({ reactions: result.results, myReactions });
+});
+
+// Toggle a reaction on a track (add if not exists, remove if exists)
+app.post('/api/share/:id/reactions', async (c) => {
+  const shareId = c.req.param('id');
+  const sessionId = getCookie(c, 'session');
+  if (!sessionId) return c.json({ error: 'Not authenticated' }, 401);
+
+  const session = await getSession(c.env.DB, sessionId);
+  if (!session) return c.json({ error: 'Not authenticated' }, 401);
+
+  const { trackId, emoji } = await c.req.json<{ trackId: string; emoji: string }>();
+
+  // Check if reaction already exists
+  const existing = await c.env.DB.prepare(
+    'SELECT id FROM reactions WHERE shared_playlist_id = ? AND track_id = ? AND session_id = ? AND emoji = ?',
+  )
+    .bind(shareId, trackId, sessionId, emoji)
+    .first();
+
+  if (existing) {
+    await c.env.DB.prepare('DELETE FROM reactions WHERE id = ?').bind(existing.id).run();
+    return c.json({ action: 'removed' });
+  } else {
+    await c.env.DB.prepare(
+      'INSERT INTO reactions (shared_playlist_id, track_id, session_id, emoji, created_at) VALUES (?, ?, ?, ?, ?)',
+    )
+      .bind(shareId, trackId, sessionId, emoji, Math.floor(Date.now() / 1000))
+      .run();
+    return c.json({ action: 'added' });
+  }
+});
+
+// ── Comments ─────────────────────────────────────────────────────────
+
+// Get comments for a specific track in a shared playlist
+app.get('/api/share/:id/comments/:trackId', async (c) => {
+  const shareId = c.req.param('id');
+  const trackId = c.req.param('trackId');
+
+  const result = await c.env.DB.prepare(
+    'SELECT c.id, c.body, c.display_name, c.created_at, c.session_id FROM comments c WHERE c.shared_playlist_id = ? AND c.track_id = ? ORDER BY c.created_at ASC',
+  )
+    .bind(shareId, trackId)
+    .all();
+
+  const sessionId = getCookie(c, 'session');
+
+  return c.json({
+    comments: result.results.map((comment) => ({
+      ...comment,
+      isMe: comment.session_id === sessionId,
+    })),
+  });
+});
+
+// Get comment counts for all tracks in a shared playlist
+app.get('/api/share/:id/comment-counts', async (c) => {
+  const shareId = c.req.param('id');
+  const result = await c.env.DB.prepare(
+    'SELECT track_id, COUNT(*) as count FROM comments WHERE shared_playlist_id = ? GROUP BY track_id',
+  )
+    .bind(shareId)
+    .all();
+
+  return c.json({ counts: result.results });
+});
+
+// Post a comment on a track
+app.post('/api/share/:id/comments/:trackId', async (c) => {
+  const shareId = c.req.param('id');
+  const trackId = c.req.param('trackId');
+  const sessionId = getCookie(c, 'session');
+  if (!sessionId) return c.json({ error: 'Not authenticated' }, 401);
+
+  const session = await getSession(c.env.DB, sessionId);
+  if (!session) return c.json({ error: 'Not authenticated' }, 401);
+
+  const { body, displayName } = await c.req.json<{ body: string; displayName?: string }>();
+
+  if (!body || body.trim().length === 0) {
+    return c.json({ error: 'Comment cannot be empty' }, 400);
+  }
+
+  const result = await c.env.DB.prepare(
+    'INSERT INTO comments (shared_playlist_id, track_id, session_id, display_name, body, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id, created_at',
+  )
+    .bind(shareId, trackId, sessionId, displayName || null, body.trim(), Math.floor(Date.now() / 1000))
+    .first();
+
+  return c.json({ success: true, comment: result });
+});
+
+// Delete a comment (only the author can delete)
+app.delete('/api/share/:id/comments/:trackId/:commentId', async (c) => {
+  const commentId = c.req.param('commentId');
+  const sessionId = getCookie(c, 'session');
+  if (!sessionId) return c.json({ error: 'Not authenticated' }, 401);
+
+  const comment = await c.env.DB.prepare('SELECT session_id FROM comments WHERE id = ?')
+    .bind(commentId)
+    .first();
+
+  if (!comment) return c.json({ error: 'Not found' }, 404);
+  if (comment.session_id !== sessionId) return c.json({ error: 'Not your comment' }, 403);
+
+  await c.env.DB.prepare('DELETE FROM comments WHERE id = ?').bind(commentId).run();
+  return c.json({ success: true });
+});
+
 // ── Debug / diagnostic endpoint ──────────────────────────────────────
 
 app.get('/api/debug/share/:id', async (c) => {
