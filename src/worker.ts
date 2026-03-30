@@ -53,24 +53,30 @@ async function fetchAllPlaylistItems(
     const params = new URLSearchParams({ include: 'items' });
     if (cursor) params.set('page[cursor]', cursor);
 
-    const resp = await fetch(
-      `${apiBase}/playlists/${playlistId}/relationships/items?${params}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/vnd.api+json',
-        },
-      },
-    );
+    const url = `${apiBase}/playlists/${playlistId}/relationships/items?${params}`;
+    console.log(`[fetchItems] GET ${url} (page ${page})`);
 
-    if (!resp.ok) break;
+    const resp = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.api+json',
+      },
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error(`[fetchItems] Failed for playlist ${playlistId}: ${resp.status} ${errText}`);
+      break;
+    }
 
     const body = (await resp.json()) as {
       data: Array<{ id: string; type: string }>;
       links?: { next?: string };
     };
 
-    allItems.push(...(body.data || []));
+    const pageItems = body.data || [];
+    console.log(`[fetchItems] Playlist ${playlistId} page ${page}: got ${pageItems.length} items`);
+    allItems.push(...pageItems);
 
     // Check for next page cursor
     if (body.links?.next) {
@@ -82,6 +88,7 @@ async function fetchAllPlaylistItems(
     }
   }
 
+  console.log(`[fetchItems] Playlist ${playlistId}: total ${allItems.length} items`);
   return allItems;
 }
 
@@ -97,10 +104,12 @@ async function syncSharedPlaylist(
 ): Promise<{ success: boolean; itemCount: number; errors: string[] }> {
   const errors: string[] = [];
 
+  console.log(`[sync] Starting sync for shared playlist ${shared.id}, source: ${shared.tidal_playlist_id}, members: ${memberEntries.length}`);
+
   // Collect items from ALL playlists (owner + every member)
-  const allPlaylistIds: Array<{ playlistId: string; session: Record<string, unknown> }> = [
-    { playlistId: shared.tidal_playlist_id as string, session: ownerSession },
-    ...memberEntries.map((m) => ({ playlistId: m.playlistId, session: m.session })),
+  const allPlaylistIds: Array<{ playlistId: string; session: Record<string, unknown>; label: string }> = [
+    { playlistId: shared.tidal_playlist_id as string, session: ownerSession, label: `owner(${ownerSession.id})` },
+    ...memberEntries.map((m) => ({ playlistId: m.playlistId, session: m.session, label: `member(${m.session.id})` })),
   ];
 
   // Use a map to deduplicate by "type:id" (same track shouldn't appear twice)
@@ -110,8 +119,13 @@ async function syncSharedPlaylist(
 
   for (const entry of allPlaylistIds) {
     try {
+      console.log(`[sync] Refreshing token for ${entry.label}, playlist ${entry.playlistId}`);
       const token = await refreshAccessToken(db, entry.session, clientId, clientSecret);
+      console.log(`[sync] Token refreshed OK for ${entry.label}`);
+
       const items = await fetchAllPlaylistItems(apiBase, entry.playlistId, token);
+      console.log(`[sync] Read ${items.length} items from ${entry.label} playlist ${entry.playlistId}`);
+
       for (const item of items) {
         const key = `${item.type}:${item.id}`;
         if (!mergedMap.has(key)) {
@@ -120,42 +134,55 @@ async function syncSharedPlaylist(
         }
       }
     } catch (e) {
-      errors.push(`Failed to read playlist ${entry.playlistId}: ${e}`);
+      const errMsg = `Failed to read playlist ${entry.playlistId} for ${entry.label}: ${e}`;
+      console.error(`[sync] ${errMsg}`);
+      errors.push(errMsg);
     }
   }
 
   const mergedItems = orderedKeys.map((key) => mergedMap.get(key)!);
+  console.log(`[sync] Merged result: ${mergedItems.length} unique items from ${allPlaylistIds.length} playlists`);
 
   // Write the merged set back to ALL playlists (owner + every member)
   for (const entry of allPlaylistIds) {
     try {
       const token = await refreshAccessToken(db, entry.session, clientId, clientSecret);
       if (mergedItems.length > 0) {
-        const resp = await fetch(
-          `${apiBase}/playlists/${entry.playlistId}/relationships/items`,
-          {
-            method: 'PUT',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              Accept: 'application/vnd.api+json',
-              'Content-Type': 'application/vnd.api+json',
-            },
-            body: JSON.stringify({
-              data: mergedItems.map((item) => ({ id: item.id, type: item.type })),
-            }),
+        const putUrl = `${apiBase}/playlists/${entry.playlistId}/relationships/items`;
+        const putBody = JSON.stringify({
+          data: mergedItems.map((item) => ({ id: item.id, type: item.type })),
+        });
+        console.log(`[sync] PUT ${putUrl} for ${entry.label} (${mergedItems.length} items, ${putBody.length} bytes)`);
+
+        const resp = await fetch(putUrl, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/vnd.api+json',
+            'Content-Type': 'application/vnd.api+json',
           },
-        );
+          body: putBody,
+        });
 
         if (!resp.ok) {
           const err = await resp.text();
-          errors.push(`Failed to write to playlist ${entry.playlistId}: ${err}`);
+          const errMsg = `Failed to write to playlist ${entry.playlistId} for ${entry.label}: HTTP ${resp.status} ${err}`;
+          console.error(`[sync] ${errMsg}`);
+          errors.push(errMsg);
+        } else {
+          console.log(`[sync] Successfully wrote ${mergedItems.length} items to ${entry.label} playlist ${entry.playlistId}`);
         }
+      } else {
+        console.log(`[sync] Skipping write for ${entry.label} - no items to write`);
       }
     } catch (e) {
-      errors.push(`Failed to sync playlist ${entry.playlistId}: ${e}`);
+      const errMsg = `Failed to sync playlist ${entry.playlistId} for ${entry.label}: ${e}`;
+      console.error(`[sync] ${errMsg}`);
+      errors.push(errMsg);
     }
   }
 
+  console.log(`[sync] Sync complete: ${mergedItems.length} items, ${errors.length} errors`);
   return { success: errors.length === 0, itemCount: mergedItems.length, errors };
 }
 
@@ -237,13 +264,18 @@ async function refreshAccessToken(
   clientSecret: string,
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  if ((session.token_expires_at as number) > now + 60) {
+  const expiresIn = (session.token_expires_at as number) - now;
+  if (expiresIn > 60) {
+    console.log(`[auth] Token for session ${session.id} still valid (expires in ${expiresIn}s)`);
     return session.access_token as string;
   }
 
   if (!session.refresh_token) {
+    console.error(`[auth] No refresh token for session ${session.id}`);
     throw new Error('No refresh token available');
   }
+
+  console.log(`[auth] Refreshing token for session ${session.id} (expired ${-expiresIn}s ago)`);
 
   const resp = await fetch('https://auth.tidal.com/v1/oauth2/token', {
     method: 'POST',
@@ -257,8 +289,12 @@ async function refreshAccessToken(
   });
 
   if (!resp.ok) {
-    throw new Error(`Token refresh failed: ${resp.status}`);
+    const errBody = await resp.text();
+    console.error(`[auth] Token refresh failed for session ${session.id}: HTTP ${resp.status} ${errBody}`);
+    throw new Error(`Token refresh failed: ${resp.status} ${errBody}`);
   }
+
+  console.log(`[auth] Token refreshed successfully for session ${session.id}`);
 
   const tokens = (await resp.json()) as {
     access_token: string;
@@ -546,8 +582,11 @@ app.get('/api/share/:id', async (c) => {
 app.post('/api/share/:id/join', async (c) => {
   const shareId = c.req.param('id');
   const sessionId = getCookie(c, 'session');
+  console.log(`[join] Join request for share ${shareId} from session ${sessionId}`);
+
   const session = await getSession(c.env.DB, sessionId);
   if (!session) {
+    console.error(`[join] No session found for ${sessionId}`);
     return c.json({ error: 'Not authenticated' }, 401);
   }
 
@@ -556,8 +595,11 @@ app.post('/api/share/:id/join', async (c) => {
     .first();
 
   if (!shared) {
+    console.error(`[join] Shared playlist ${shareId} not found`);
     return c.json({ error: 'Not found' }, 404);
   }
+
+  console.log(`[join] Found shared playlist: ${shared.name}, source: ${shared.tidal_playlist_id}`);
 
   const accessToken = await refreshAccessToken(
     c.env.DB,
@@ -567,6 +609,7 @@ app.post('/api/share/:id/join', async (c) => {
   );
 
   // Get the source playlist details
+  console.log(`[join] Fetching source playlist details: ${shared.tidal_playlist_id}`);
   const playlistResp = await fetch(
     `${c.env.TIDAL_API_BASE}/playlists/${shared.tidal_playlist_id}`,
     {
@@ -583,9 +626,24 @@ app.post('/api/share/:id/join', async (c) => {
       data: { attributes: { name: string } };
     };
     playlistName = playlistData.data.attributes.name;
+    console.log(`[join] Source playlist name: ${playlistName}`);
+  } else {
+    const errText = await playlistResp.text();
+    console.warn(`[join] Could not fetch source playlist details: ${playlistResp.status} ${errText}`);
   }
 
   // Create a copy of the playlist in the joining user's account
+  const createBody = JSON.stringify({
+    data: {
+      attributes: {
+        name: `${playlistName} (synced)`,
+        description: 'Synced from collaborative playlist',
+      },
+      type: 'playlists',
+    },
+  });
+  console.log(`[join] Creating playlist copy: POST ${c.env.TIDAL_API_BASE}/playlists body=${createBody}`);
+
   const createResp = await fetch(`${c.env.TIDAL_API_BASE}/playlists`, {
     method: 'POST',
     headers: {
@@ -593,19 +651,12 @@ app.post('/api/share/:id/join', async (c) => {
       Accept: 'application/vnd.api+json',
       'Content-Type': 'application/vnd.api+json',
     },
-    body: JSON.stringify({
-      data: {
-        attributes: {
-          name: `${playlistName} (synced)`,
-          description: 'Synced from collaborative playlist',
-        },
-        type: 'playlists',
-      },
-    }),
+    body: createBody,
   });
 
   if (!createResp.ok) {
     const errBody = await createResp.text();
+    console.error(`[join] Failed to create playlist copy: ${createResp.status} ${errBody}`);
     return c.json({
       error: 'Failed to create playlist copy in your Tidal account',
       status: createResp.status,
@@ -615,6 +666,7 @@ app.post('/api/share/:id/join', async (c) => {
 
   const createData = (await createResp.json()) as { data: { id: string } };
   const theirPlaylistId = createData.data.id;
+  console.log(`[join] Created playlist copy: ${theirPlaylistId}`);
 
   await c.env.DB.prepare(
     'INSERT OR REPLACE INTO playlist_members (shared_playlist_id, session_id, their_playlist_id, joined_at) VALUES (?, ?, ?, ?)',
@@ -622,6 +674,7 @@ app.post('/api/share/:id/join', async (c) => {
     .bind(shareId, sessionId, theirPlaylistId, Math.floor(Date.now() / 1000))
     .run();
 
+  console.log(`[join] Member saved: share=${shareId} session=${sessionId} playlist=${theirPlaylistId}`);
   return c.json({ success: true, theirPlaylistId });
 });
 
@@ -630,8 +683,11 @@ app.post('/api/share/:id/join', async (c) => {
 app.post('/api/share/:id/sync', async (c) => {
   const shareId = c.req.param('id');
   const sessionId = getCookie(c, 'session');
+  console.log(`[manualSync] Sync request for share ${shareId} from session ${sessionId}`);
+
   const session = await getSession(c.env.DB, sessionId);
   if (!session) {
+    console.error(`[manualSync] No session for ${sessionId}`);
     return c.json({ error: 'Not authenticated' }, 401);
   }
 
@@ -639,6 +695,7 @@ app.post('/api/share/:id/sync', async (c) => {
     .bind(shareId)
     .first();
   if (!shared) {
+    console.error(`[manualSync] Shared playlist ${shareId} not found`);
     return c.json({ error: 'Not found' }, 404);
   }
 
@@ -646,8 +703,11 @@ app.post('/api/share/:id/sync', async (c) => {
     .bind(shared.owner_session_id)
     .first();
   if (!ownerSession) {
+    console.error(`[manualSync] Owner session ${shared.owner_session_id} not found`);
     return c.json({ error: 'Owner session expired' }, 400);
   }
+
+  console.log(`[manualSync] Owner session found, querying members...`);
 
   // Get all members for bidirectional sync
   const members = await c.env.DB.prepare(
@@ -676,7 +736,10 @@ app.post('/api/share/:id/sync', async (c) => {
       playlistId: m.their_playlist_id as string,
     }));
 
+  console.log(`[manualSync] Found ${members.results.length} member rows, ${memberEntries.length} with playlist IDs`);
+
   if (memberEntries.length === 0) {
+    console.log(`[manualSync] No members to sync, returning early`);
     return c.json({ success: true, itemCount: 0, message: 'No members to sync yet' });
   }
 
