@@ -143,37 +143,46 @@ async function syncSharedPlaylist(
   const mergedItems = orderedKeys.map((key) => mergedMap.get(key)!);
   console.log(`[sync] Merged result: ${mergedItems.length} unique items from ${allPlaylistIds.length} playlists`);
 
-  // Write the merged set back to ALL playlists (owner + every member)
+  // For each playlist, figure out what items are missing and POST only those
   for (const entry of allPlaylistIds) {
     try {
       const token = await refreshAccessToken(db, entry.session, clientId, clientSecret);
-      if (mergedItems.length > 0) {
-        const putUrl = `${apiBase}/playlists/${entry.playlistId}/relationships/items`;
-        const putBody = JSON.stringify({
-          data: mergedItems.map((item) => ({ id: item.id, type: item.type })),
-        });
-        console.log(`[sync] PUT ${putUrl} for ${entry.label} (${mergedItems.length} items, ${putBody.length} bytes)`);
 
-        const resp = await fetch(putUrl, {
-          method: 'PUT',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: 'application/vnd.api+json',
-            'Content-Type': 'application/vnd.api+json',
-          },
-          body: putBody,
-        });
+      // Read current items in this playlist
+      const currentItems = await fetchAllPlaylistItems(apiBase, entry.playlistId, token);
+      const currentSet = new Set(currentItems.map((item) => `${item.type}:${item.id}`));
 
-        if (!resp.ok) {
-          const err = await resp.text();
-          const errMsg = `Failed to write to playlist ${entry.playlistId} for ${entry.label}: HTTP ${resp.status} ${err}`;
-          console.error(`[sync] ${errMsg}`);
-          errors.push(errMsg);
-        } else {
-          console.log(`[sync] Successfully wrote ${mergedItems.length} items to ${entry.label} playlist ${entry.playlistId}`);
-        }
+      // Find items that need to be added
+      const missingItems = mergedItems.filter((item) => !currentSet.has(`${item.type}:${item.id}`));
+
+      if (missingItems.length === 0) {
+        console.log(`[sync] ${entry.label} playlist ${entry.playlistId} already up to date (${currentItems.length} items)`);
+        continue;
+      }
+
+      const postUrl = `${apiBase}/playlists/${entry.playlistId}/relationships/items`;
+      const postBody = JSON.stringify({
+        data: missingItems.map((item) => ({ id: item.id, type: item.type })),
+      });
+      console.log(`[sync] POST ${postUrl} for ${entry.label}: adding ${missingItems.length} missing items (has ${currentItems.length}, merged total ${mergedItems.length})`);
+
+      const resp = await fetch(postUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.api+json',
+          'Content-Type': 'application/vnd.api+json',
+        },
+        body: postBody,
+      });
+
+      if (!resp.ok) {
+        const err = await resp.text();
+        const errMsg = `Failed to add items to playlist ${entry.playlistId} for ${entry.label}: HTTP ${resp.status} ${err}`;
+        console.error(`[sync] ${errMsg}`);
+        errors.push(errMsg);
       } else {
-        console.log(`[sync] Skipping write for ${entry.label} - no items to write`);
+        console.log(`[sync] Successfully added ${missingItems.length} items to ${entry.label} playlist ${entry.playlistId}`);
       }
     } catch (e) {
       const errMsg = `Failed to sync playlist ${entry.playlistId} for ${entry.label}: ${e}`;
@@ -182,7 +191,7 @@ async function syncSharedPlaylist(
     }
   }
 
-  console.log(`[sync] Sync complete: ${mergedItems.length} items, ${errors.length} errors`);
+  console.log(`[sync] Sync complete: ${mergedItems.length} merged items, ${errors.length} errors`);
   return { success: errors.length === 0, itemCount: mergedItems.length, errors };
 }
 
