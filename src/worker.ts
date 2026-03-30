@@ -37,7 +37,8 @@ function base64UrlEncode(bytes: Uint8Array): string {
 
 async function getSession(db: D1Database, sessionId: string | undefined) {
   if (!sessionId) return null;
-  return db.prepare('SELECT * FROM sessions WHERE id = ?').bind(sessionId).first();
+  // Exclude logged-out sessions (access_token cleared on logout)
+  return db.prepare('SELECT * FROM sessions WHERE id = ? AND access_token != \'\'').bind(sessionId).first();
 }
 
 /** Fetch all items from a playlist, handling cursor pagination */
@@ -65,6 +66,10 @@ async function fetchAllPlaylistItems(
 
     if (!resp.ok) {
       const errText = await resp.text();
+      if (resp.status === 404) {
+        console.warn(`[fetchItems] Playlist ${playlistId} not found (404) — may have been deleted from Tidal`);
+        return allItems; // Return whatever we have (likely empty)
+      }
       console.error(`[fetchItems] Failed for playlist ${playlistId}: ${resp.status} ${errText}`);
       break;
     }
@@ -178,9 +183,13 @@ async function syncSharedPlaylist(
 
       if (!resp.ok) {
         const err = await resp.text();
-        const errMsg = `Failed to add items to playlist ${entry.playlistId} for ${entry.label}: HTTP ${resp.status} ${err}`;
-        console.error(`[sync] ${errMsg}`);
-        errors.push(errMsg);
+        if (resp.status === 404) {
+          console.warn(`[sync] Playlist ${entry.playlistId} for ${entry.label} not found (404) — skipping (may have been deleted from Tidal)`);
+        } else {
+          const errMsg = `Failed to add items to playlist ${entry.playlistId} for ${entry.label}: HTTP ${resp.status} ${err}`;
+          console.error(`[sync] ${errMsg}`);
+          errors.push(errMsg);
+        }
       } else {
         console.log(`[sync] Successfully added ${missingItems.length} items to ${entry.label} playlist ${entry.playlistId}`);
       }
@@ -461,6 +470,51 @@ app.get('/auth/callback', async (c) => {
     .bind(sessionId, tidalUserId, tokens.access_token, tokens.refresh_token, now + tokens.expires_in, displayName, now, now)
     .run();
 
+  // Backfill stable tidal_user_id on older records that only had session_id.
+  // This fixes visibility after re-login: old shared_playlists / playlist_members
+  // rows created before tidal_user_id tracking was added now get linked.
+  if (tidalUserId) {
+    // Collect old session IDs that belong to this user:
+    // 1) Sessions that already have this tidal_user_id (from previous logins after the fix)
+    const oldSessions = await c.env.DB.prepare(
+      'SELECT id FROM sessions WHERE tidal_user_id = ? AND id != ?',
+    )
+      .bind(tidalUserId, sessionId)
+      .all();
+    const oldSessionIds = oldSessions.results.map((s) => s.id as string);
+
+    // 2) The session from the cookie the user had BEFORE this login — this links
+    //    pre-migration sessions (tidal_user_id = NULL) to this Tidal user.
+    const prevSessionId = getCookie(c, 'session');
+    if (prevSessionId && prevSessionId !== sessionId && !oldSessionIds.includes(prevSessionId)) {
+      oldSessionIds.push(prevSessionId);
+      // Also set tidal_user_id on the old session itself for future lookups
+      await c.env.DB.prepare(
+        'UPDATE sessions SET tidal_user_id = ?, display_name = COALESCE(display_name, ?) WHERE id = ? AND tidal_user_id IS NULL',
+      )
+        .bind(tidalUserId, displayName, prevSessionId)
+        .run();
+    }
+
+    if (oldSessionIds.length > 0) {
+      await c.env.DB.batch([
+        // Update shared_playlists where owner_tidal_user_id is still NULL
+        ...oldSessionIds.map((oldId) =>
+          c.env.DB.prepare(
+            'UPDATE shared_playlists SET owner_tidal_user_id = ? WHERE owner_session_id = ? AND owner_tidal_user_id IS NULL',
+          ).bind(tidalUserId, oldId),
+        ),
+        // Backfill playlist_members
+        ...oldSessionIds.map((oldId) =>
+          c.env.DB.prepare(
+            'UPDATE playlist_members SET tidal_user_id = ? WHERE session_id = ? AND tidal_user_id IS NULL',
+          ).bind(tidalUserId, oldId),
+        ),
+      ]);
+      console.log(`[auth] Backfilled tidal_user_id=${tidalUserId} on ${oldSessionIds.length} old sessions' records`);
+    }
+  }
+
   setCookie(c, 'session', sessionId, {
     httpOnly: true,
     secure: true,
@@ -475,7 +529,14 @@ app.get('/auth/callback', async (c) => {
 app.get('/auth/logout', async (c) => {
   const sessionId = getCookie(c, 'session');
   if (sessionId) {
-    await c.env.DB.prepare('DELETE FROM sessions WHERE id = ?').bind(sessionId).run();
+    // Don't delete the session row — it's referenced by FK constraints in
+    // shared_playlists, playlist_members, reactions, comments.
+    // Instead, wipe the tokens so the session can't be used for API calls.
+    await c.env.DB.prepare(
+      'UPDATE sessions SET access_token = \'\', refresh_token = NULL, token_expires_at = 0, updated_at = ? WHERE id = ?',
+    )
+      .bind(Math.floor(Date.now() / 1000), sessionId)
+      .run();
   }
   deleteCookie(c, 'session', { path: '/' });
   return c.redirect('/');
@@ -613,6 +674,10 @@ app.post('/api/share', async (c) => {
 app.delete('/api/share/:id', async (c) => {
   const shareId = c.req.param('id');
   const sessionId = getCookie(c, 'session');
+  const session = await getSession(c.env.DB, sessionId);
+  if (!session) {
+    return c.json({ error: 'Not authenticated' }, 401);
+  }
 
   const shared = await c.env.DB.prepare('SELECT * FROM shared_playlists WHERE id = ?')
     .bind(shareId)
@@ -622,7 +687,11 @@ app.delete('/api/share/:id', async (c) => {
     return c.json({ error: 'Not found' }, 404);
   }
 
-  if (shared.owner_session_id !== sessionId) {
+  // Check ownership by session_id OR tidal_user_id (survives re-login)
+  const isOwner =
+    shared.owner_session_id === sessionId ||
+    (session.tidal_user_id && shared.owner_tidal_user_id === session.tidal_user_id);
+  if (!isOwner) {
     return c.json({ error: 'Only the owner can delete a shared playlist' }, 403);
   }
 
