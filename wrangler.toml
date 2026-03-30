@@ -8,7 +8,7 @@ directory = "./public"
 [[d1_databases]]
 binding = "DB"
 database_name = "tidal-collab-db"
-database_id = "placeholder-replace-after-creation"
+database_id = "faa2ee95-7a84-419f-8fdb-b7840e21d093"
 
 [vars]
 TIDAL_AUTH_BASE = "https://login.tidal.com"
