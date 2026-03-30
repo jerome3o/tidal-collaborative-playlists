@@ -597,19 +597,24 @@ app.post('/api/share/:id/join', async (c) => {
       data: {
         attributes: {
           name: `${playlistName} (synced)`,
-          description: `Synced from collaborative playlist`,
-          privacy: 'PRIVATE',
+          description: 'Synced from collaborative playlist',
         },
         type: 'playlists',
       },
     }),
   });
 
-  let theirPlaylistId: string | null = null;
-  if (createResp.ok) {
-    const createData = (await createResp.json()) as { data: { id: string } };
-    theirPlaylistId = createData.data.id;
+  if (!createResp.ok) {
+    const errBody = await createResp.text();
+    return c.json({
+      error: 'Failed to create playlist copy in your Tidal account',
+      status: createResp.status,
+      details: errBody,
+    }, 500);
   }
+
+  const createData = (await createResp.json()) as { data: { id: string } };
+  const theirPlaylistId = createData.data.id;
 
   await c.env.DB.prepare(
     'INSERT OR REPLACE INTO playlist_members (shared_playlist_id, session_id, their_playlist_id, joined_at) VALUES (?, ?, ?, ?)',
@@ -646,7 +651,12 @@ app.post('/api/share/:id/sync', async (c) => {
 
   // Get all members for bidirectional sync
   const members = await c.env.DB.prepare(
-    'SELECT pm.session_id, pm.their_playlist_id, s.* FROM playlist_members pm JOIN sessions s ON pm.session_id = s.id WHERE pm.shared_playlist_id = ?',
+    `SELECT pm.session_id, pm.their_playlist_id,
+            s.id as s_id, s.tidal_user_id, s.access_token, s.refresh_token,
+            s.token_expires_at, s.created_at as s_created_at, s.updated_at as s_updated_at
+     FROM playlist_members pm
+     JOIN sessions s ON pm.session_id = s.id
+     WHERE pm.shared_playlist_id = ?`,
   )
     .bind(shareId)
     .all();
@@ -654,9 +664,21 @@ app.post('/api/share/:id/sync', async (c) => {
   const memberEntries = members.results
     .filter((m) => m.their_playlist_id)
     .map((m) => ({
-      session: m as Record<string, unknown>,
+      session: {
+        id: m.s_id,
+        tidal_user_id: m.tidal_user_id,
+        access_token: m.access_token,
+        refresh_token: m.refresh_token,
+        token_expires_at: m.token_expires_at,
+        created_at: m.s_created_at,
+        updated_at: m.s_updated_at,
+      } as Record<string, unknown>,
       playlistId: m.their_playlist_id as string,
     }));
+
+  if (memberEntries.length === 0) {
+    return c.json({ success: true, itemCount: 0, message: 'No members to sync yet' });
+  }
 
   const result = await syncSharedPlaylist(
     c.env.DB,
