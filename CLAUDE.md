@@ -1,0 +1,85 @@
+# Tidal Collaborative Playlists
+
+PWA that lets Tidal users share playlists and sync them bidirectionally. Hosted on Cloudflare Workers with D1 for storage.
+
+## Quick Reference
+
+- **Build/type-check**: `npx tsc --noEmit`
+- **Dev server**: `npm run dev` (requires `.dev.vars` with secrets — see `.dev.vars.example`)
+- **Deploy**: `npm run deploy` (or push to `main` for CI deploy)
+- **Init local DB**: `npm run db:init`
+- **Run migrations**: `npx wrangler d1 execute tidal-collab-db --remote --file=./migrations/NNN.sql`
+
+## Architecture
+
+Single Cloudflare Worker (Hono framework) serves both the API and static frontend.
+
+```
+src/worker.ts     — All backend logic: OAuth, API proxy, sync, reactions, comments
+public/           — Static frontend (vanilla JS PWA, no build step)
+  app.js          — SPA router, all UI rendering
+  style.css       — Dark theme styles
+  sw.js           — Service worker for offline PWA
+schema.sql        — Full DB schema (for fresh installs)
+migrations/       — Incremental D1 migrations (run in order by deploy workflow)
+wrangler.toml     — Cloudflare Workers config (D1 binding, cron, env vars)
+```
+
+## How the App Works
+
+1. User logs in via **Tidal OAuth2 PKCE** — tokens stored server-side in D1
+2. User picks a playlist and creates a **share link**
+3. Friend opens link, logs in, clicks **"Join & Create Copy"** — creates a playlist in their Tidal account
+4. **Bidirectional sync** merges items from all copies (owner + members), POSTs missing items to each
+5. Sync runs: manually (button), auto-poll (3min while page open), cron (every 15min)
+
+## Tidal API Gotchas
+
+- **No PUT on playlist items** — `/playlists/{id}/relationships/items` only supports GET, POST, DELETE, PATCH. Sync uses POST to add missing items.
+- **PATCH on items** requires `itemId` (the playlist-item ID, not the track ID) — it's for reordering, not replacing
+- **Playlist creation**: don't send `privacy` field — use `accessType: "PUBLIC" | "UNLISTED"` or omit for default
+- **Rate limits**: undocumented, app is in "Development mode" with strict quotas. 429s include `retry_after` header.
+- **Token expiry**: access tokens last 24h, refresh is handled in `refreshAccessToken()`
+- **User profile**: `GET /users/me` returns `firstName`, `lastName` (requires `user.read` scope)
+- **Base URL**: `https://openapi.tidal.com/v2/` — all requests need `Accept: application/vnd.api+json`
+
+## Session & Identity Model
+
+Sessions are tied to `tidal_user_id` (stable across re-logins), not just `session_id` (changes each login). All ownership and membership queries use `tidal_user_id` with fallback to `session_id` for backward compatibility. When looking up sessions for sync, always find the **most recent** session for a `tidal_user_id`.
+
+## Database
+
+D1 SQLite with these tables:
+- `sessions` — OAuth tokens, tidal_user_id, display_name
+- `shared_playlists` — shared playlist links, owner identity
+- `playlist_members` — who joined, their playlist copy ID
+- `reactions` — emoji reactions per track per user (toggle)
+- `comments` — threaded comments per track
+- `pkce_state` — temporary PKCE verifiers during OAuth flow
+
+Migrations in `migrations/` are run in filename order by the deploy workflow before deploying.
+
+## Deployment
+
+- **CI/CD**: GitHub Actions deploys on push to `main` (`.github/workflows/deploy.yml`)
+- **Setup**: `.github/workflows/setup.yml` (manual dispatch) creates D1 DB, runs schema, sets secrets
+- **Secrets needed**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `TIDAL_CLIENT_ID`, `TIDAL_CLIENT_SECRET` in GitHub Actions
+- **Tidal dashboard**: redirect URI must be `https://tidal-collaborative-playlists.jeromeswannack.workers.dev/auth/callback`
+
+## MCP Tools
+
+When Cloudflare MCP tools are available, use them to:
+- Read worker logs (look for `[sync]`, `[auth]`, `[join]`, `[manualSync]`, `[fetchItems]` prefixes)
+- Query D1 directly to inspect sessions, shared playlists, members
+- Check cron trigger execution results
+
+## Debug Endpoints
+
+These exist for troubleshooting (consider removing for production):
+- `GET /auth/debug` — shows OAuth config being sent to Tidal
+- `GET /api/debug/share/:id` — shared playlist state, member sessions, token expiry
+- `GET /api/debug/state` — all shares, members, sessions (no tokens/secrets)
+
+## Dev Log
+
+See `dev-log/` for detailed session notes, bugs encountered, and decisions made.
