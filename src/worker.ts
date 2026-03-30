@@ -40,6 +40,150 @@ async function getSession(db: D1Database, sessionId: string | undefined) {
   return db.prepare('SELECT * FROM sessions WHERE id = ?').bind(sessionId).first();
 }
 
+/** Fetch all items from a playlist, handling cursor pagination */
+async function fetchAllPlaylistItems(
+  apiBase: string,
+  playlistId: string,
+  token: string,
+): Promise<Array<{ id: string; type: string }>> {
+  const allItems: Array<{ id: string; type: string }> = [];
+  let cursor: string | undefined;
+
+  for (let page = 0; page < 20; page++) {
+    const params = new URLSearchParams({ include: 'items' });
+    if (cursor) params.set('page[cursor]', cursor);
+
+    const resp = await fetch(
+      `${apiBase}/playlists/${playlistId}/relationships/items?${params}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.api+json',
+        },
+      },
+    );
+
+    if (!resp.ok) break;
+
+    const body = (await resp.json()) as {
+      data: Array<{ id: string; type: string }>;
+      links?: { next?: string };
+    };
+
+    allItems.push(...(body.data || []));
+
+    // Check for next page cursor
+    if (body.links?.next) {
+      const nextUrl = new URL(body.links.next, apiBase);
+      cursor = nextUrl.searchParams.get('page[cursor]') || undefined;
+      if (!cursor) break;
+    } else {
+      break;
+    }
+  }
+
+  return allItems;
+}
+
+/** Sync a single shared playlist to a single member's copy */
+async function syncPlaylistForMember(
+  db: D1Database,
+  apiBase: string,
+  clientId: string,
+  clientSecret: string,
+  sourcePlaylistId: string,
+  ownerSession: Record<string, unknown>,
+  memberSession: Record<string, unknown>,
+  memberPlaylistId: string,
+): Promise<{ success: boolean; itemCount: number; error?: string }> {
+  try {
+    const ownerToken = await refreshAccessToken(db, ownerSession, clientId, clientSecret);
+    const items = await fetchAllPlaylistItems(apiBase, sourcePlaylistId, ownerToken);
+
+    const memberToken = await refreshAccessToken(db, memberSession, clientId, clientSecret);
+
+    if (items.length > 0) {
+      const syncResp = await fetch(
+        `${apiBase}/playlists/${memberPlaylistId}/relationships/items`,
+        {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${memberToken}`,
+            Accept: 'application/vnd.api+json',
+            'Content-Type': 'application/vnd.api+json',
+          },
+          body: JSON.stringify({
+            data: items.map((item) => ({ id: item.id, type: item.type })),
+          }),
+        },
+      );
+
+      if (!syncResp.ok) {
+        const err = await syncResp.text();
+        return { success: false, itemCount: 0, error: err };
+      }
+    }
+
+    return { success: true, itemCount: items.length };
+  } catch (e) {
+    return { success: false, itemCount: 0, error: String(e) };
+  }
+}
+
+/** Sync all shared playlists for all members (used by cron) */
+async function syncAllPlaylists(
+  db: D1Database,
+  apiBase: string,
+  clientId: string,
+  clientSecret: string,
+): Promise<{ synced: number; failed: number; errors: string[] }> {
+  const sharedPlaylists = await db.prepare('SELECT * FROM shared_playlists').all();
+  let synced = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const shared of sharedPlaylists.results) {
+    const ownerSession = await db
+      .prepare('SELECT * FROM sessions WHERE id = ?')
+      .bind(shared.owner_session_id)
+      .first();
+    if (!ownerSession) {
+      errors.push(`Shared ${shared.id}: owner session expired`);
+      failed++;
+      continue;
+    }
+
+    const members = await db
+      .prepare('SELECT pm.*, s.* FROM playlist_members pm JOIN sessions s ON pm.session_id = s.id WHERE pm.shared_playlist_id = ?')
+      .bind(shared.id)
+      .all();
+
+    for (const member of members.results) {
+      if (!member.their_playlist_id) continue;
+
+      const result = await syncPlaylistForMember(
+        db,
+        apiBase,
+        clientId,
+        clientSecret,
+        shared.tidal_playlist_id as string,
+        ownerSession as Record<string, unknown>,
+        member as Record<string, unknown>,
+        member.their_playlist_id as string,
+      );
+
+      if (result.success) {
+        synced++;
+      } else {
+        failed++;
+        errors.push(`Shared ${shared.id} -> member ${member.session_id}: ${result.error}`);
+      }
+    }
+  }
+
+  return { synced, failed, errors };
+}
+
 async function refreshAccessToken(
   db: D1Database,
   session: Record<string, unknown>,
@@ -447,7 +591,6 @@ app.post('/api/share/:id/sync', async (c) => {
     return c.json({ error: 'Not found' }, 404);
   }
 
-  // Get the owner's session to read the source playlist
   const ownerSession = await c.env.DB.prepare('SELECT * FROM sessions WHERE id = ?')
     .bind(shared.owner_session_id)
     .first();
@@ -455,34 +598,6 @@ app.post('/api/share/:id/sync', async (c) => {
     return c.json({ error: 'Owner session expired' }, 400);
   }
 
-  const ownerToken = await refreshAccessToken(
-    c.env.DB,
-    ownerSession as Record<string, unknown>,
-    c.env.TIDAL_CLIENT_ID,
-    c.env.TIDAL_CLIENT_SECRET,
-  );
-
-  // Get source playlist items
-  const itemsResp = await fetch(
-    `${c.env.TIDAL_API_BASE}/playlists/${shared.tidal_playlist_id}/relationships/items?include=items`,
-    {
-      headers: {
-        Authorization: `Bearer ${ownerToken}`,
-        Accept: 'application/vnd.api+json',
-      },
-    },
-  );
-
-  if (!itemsResp.ok) {
-    return c.json({ error: 'Failed to fetch source playlist items' }, 500);
-  }
-
-  const itemsData = (await itemsResp.json()) as {
-    data: Array<{ id: string; type: string }>;
-  };
-  const items = itemsData.data || [];
-
-  // Sync to the requesting user's playlist copy
   const member = await c.env.DB.prepare(
     'SELECT * FROM playlist_members WHERE shared_playlist_id = ? AND session_id = ?',
   )
@@ -493,40 +608,22 @@ app.post('/api/share/:id/sync', async (c) => {
     return c.json({ error: 'No playlist copy found. Join first.' }, 400);
   }
 
-  const userToken = await refreshAccessToken(
+  const result = await syncPlaylistForMember(
     c.env.DB,
-    session as Record<string, unknown>,
+    c.env.TIDAL_API_BASE,
     c.env.TIDAL_CLIENT_ID,
     c.env.TIDAL_CLIENT_SECRET,
+    shared.tidal_playlist_id as string,
+    ownerSession as Record<string, unknown>,
+    session as Record<string, unknown>,
+    member.their_playlist_id as string,
   );
 
-  // Replace all items in the user's copy
-  if (items.length > 0) {
-    const syncResp = await fetch(
-      `${c.env.TIDAL_API_BASE}/playlists/${member.their_playlist_id}/relationships/items`,
-      {
-        method: 'PUT',
-        headers: {
-          Authorization: `Bearer ${userToken}`,
-          Accept: 'application/vnd.api+json',
-          'Content-Type': 'application/vnd.api+json',
-        },
-        body: JSON.stringify({
-          data: items.map((item) => ({
-            id: item.id,
-            type: item.type,
-          })),
-        }),
-      },
-    );
-
-    if (!syncResp.ok) {
-      const err = await syncResp.text();
-      return c.json({ error: 'Sync failed', details: err }, 500);
-    }
+  if (!result.success) {
+    return c.json({ error: 'Sync failed', details: result.error }, 500);
   }
 
-  return c.json({ success: true, itemCount: items.length });
+  return c.json({ success: true, itemCount: result.itemCount });
 });
 
 // ── My shared playlists ──────────────────────────────────────────────
@@ -550,4 +647,45 @@ app.get('/api/my-shares', async (c) => {
   return c.json({ shares: shares.results, memberships: memberships.results });
 });
 
-export default app;
+// ── Sync status endpoint (for frontend polling) ─────────────────────
+
+app.get('/api/share/:id/sync-status', async (c) => {
+  const shareId = c.req.param('id');
+  const shared = await c.env.DB.prepare('SELECT * FROM shared_playlists WHERE id = ?')
+    .bind(shareId)
+    .first();
+  if (!shared) return c.json({ error: 'Not found' }, 404);
+
+  const members = await c.env.DB.prepare(
+    'SELECT COUNT(*) as count FROM playlist_members WHERE shared_playlist_id = ?',
+  )
+    .bind(shareId)
+    .first<{ count: number }>();
+
+  return c.json({
+    playlistId: shared.tidal_playlist_id,
+    name: shared.name,
+    memberCount: members?.count || 0,
+    lastChecked: new Date().toISOString(),
+  });
+});
+
+// ── Export with scheduled handler ────────────────────────────────────
+
+export default {
+  fetch: app.fetch,
+  async scheduled(event: ScheduledEvent, env: Env['Bindings'], ctx: ExecutionContext) {
+    ctx.waitUntil(
+      syncAllPlaylists(env.DB, env.TIDAL_API_BASE, env.TIDAL_CLIENT_ID, env.TIDAL_CLIENT_SECRET)
+        .then((result) => {
+          console.log(
+            `Cron sync complete: ${result.synced} synced, ${result.failed} failed`,
+            result.errors.length > 0 ? result.errors : '',
+          );
+        })
+        .catch((err) => {
+          console.error('Cron sync error:', err);
+        }),
+    );
+  },
+};
