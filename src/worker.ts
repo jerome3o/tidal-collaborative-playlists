@@ -208,10 +208,15 @@ async function syncAllPlaylists(
   const errors: string[] = [];
 
   for (const shared of sharedPlaylists.results) {
-    const ownerSession = await db
-      .prepare('SELECT * FROM sessions WHERE id = ?')
-      .bind(shared.owner_session_id)
-      .first();
+    // Try to find the owner's session: first by tidal_user_id (survives re-login), then by session_id
+    let ownerSession = shared.owner_tidal_user_id
+      ? await db.prepare('SELECT * FROM sessions WHERE tidal_user_id = ? ORDER BY updated_at DESC LIMIT 1')
+          .bind(shared.owner_tidal_user_id).first()
+      : null;
+    if (!ownerSession) {
+      ownerSession = await db.prepare('SELECT * FROM sessions WHERE id = ?')
+        .bind(shared.owner_session_id).first();
+    }
     if (!ownerSession) {
       errors.push(`Shared ${shared.id}: owner session expired`);
       failed++;
@@ -420,16 +425,40 @@ app.get('/auth/callback', async (c) => {
   const now = Math.floor(Date.now() / 1000);
   const sessionId = generateId();
 
-  // Try to extract user ID from the token response or make a /me call
+  // Fetch user profile from Tidal to get user ID and display name
   let tidalUserId: string | null = null;
+  let displayName: string | null = null;
+
   if (tokens.user?.userId) {
     tidalUserId = tokens.user.userId;
   }
 
+  // Call /users/me to get user ID and name
+  try {
+    const userResp = await fetch(`${c.env.TIDAL_API_BASE}/users/me`, {
+      headers: {
+        Authorization: `Bearer ${tokens.access_token}`,
+        Accept: 'application/vnd.api+json',
+      },
+    });
+    if (userResp.ok) {
+      const userData = (await userResp.json()) as {
+        data: { id: string; attributes: { firstName?: string; lastName?: string } };
+      };
+      tidalUserId = tidalUserId || userData.data.id;
+      const first = userData.data.attributes.firstName || '';
+      const last = userData.data.attributes.lastName || '';
+      displayName = [first, last].filter(Boolean).join(' ') || null;
+      console.log(`[auth] User profile: id=${tidalUserId} name=${displayName}`);
+    }
+  } catch (e) {
+    console.warn(`[auth] Failed to fetch user profile: ${e}`);
+  }
+
   await c.env.DB.prepare(
-    'INSERT INTO sessions (id, tidal_user_id, access_token, refresh_token, token_expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO sessions (id, tidal_user_id, access_token, refresh_token, token_expires_at, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   )
-    .bind(sessionId, tidalUserId, tokens.access_token, tokens.refresh_token, now + tokens.expires_in, now, now)
+    .bind(sessionId, tidalUserId, tokens.access_token, tokens.refresh_token, now + tokens.expires_in, displayName, now, now)
     .run();
 
   setCookie(c, 'session', sessionId, {
@@ -458,7 +487,7 @@ app.get('/auth/me', async (c) => {
   if (!session) {
     return c.json({ loggedIn: false });
   }
-  return c.json({ loggedIn: true, userId: session.tidal_user_id });
+  return c.json({ loggedIn: true, userId: session.tidal_user_id, displayName: session.display_name });
 });
 
 // ── Tidal API Proxy ──────────────────────────────────────────────────
@@ -573,9 +602,9 @@ app.post('/api/share', async (c) => {
   const shareId = generateId().slice(0, 12);
 
   await c.env.DB.prepare(
-    'INSERT INTO shared_playlists (id, tidal_playlist_id, owner_session_id, name, created_at) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO shared_playlists (id, tidal_playlist_id, owner_session_id, owner_tidal_user_id, name, created_at) VALUES (?, ?, ?, ?, ?, ?)',
   )
-    .bind(shareId, playlistId, sessionId, name, Math.floor(Date.now() / 1000))
+    .bind(shareId, playlistId, sessionId, session.tidal_user_id, name, Math.floor(Date.now() / 1000))
     .run();
 
   return c.json({ shareId, shareUrl: `${c.env.APP_URL}/#/shared/${shareId}` });
@@ -617,7 +646,7 @@ app.get('/api/share/:id', async (c) => {
   }
 
   const members = await c.env.DB.prepare(
-    'SELECT pm.*, s.tidal_user_id FROM playlist_members pm JOIN sessions s ON pm.session_id = s.id WHERE pm.shared_playlist_id = ?',
+    'SELECT pm.*, s.tidal_user_id, s.display_name FROM playlist_members pm JOIN sessions s ON pm.session_id = s.id WHERE pm.shared_playlist_id = ?',
   )
     .bind(shareId)
     .all();
@@ -715,9 +744,9 @@ app.post('/api/share/:id/join', async (c) => {
   console.log(`[join] Created playlist copy: ${theirPlaylistId}`);
 
   await c.env.DB.prepare(
-    'INSERT OR REPLACE INTO playlist_members (shared_playlist_id, session_id, their_playlist_id, joined_at) VALUES (?, ?, ?, ?)',
+    'INSERT OR REPLACE INTO playlist_members (shared_playlist_id, session_id, tidal_user_id, their_playlist_id, joined_at) VALUES (?, ?, ?, ?, ?)',
   )
-    .bind(shareId, sessionId, theirPlaylistId, Math.floor(Date.now() / 1000))
+    .bind(shareId, sessionId, session.tidal_user_id, theirPlaylistId, Math.floor(Date.now() / 1000))
     .run();
 
   console.log(`[join] Member saved: share=${shareId} session=${sessionId} playlist=${theirPlaylistId}`);
@@ -745,44 +774,51 @@ app.post('/api/share/:id/sync', async (c) => {
     return c.json({ error: 'Not found' }, 404);
   }
 
-  const ownerSession = await c.env.DB.prepare('SELECT * FROM sessions WHERE id = ?')
-    .bind(shared.owner_session_id)
-    .first();
+  // Find owner session: by tidal_user_id first (survives re-login), then by session_id
+  let ownerSession = shared.owner_tidal_user_id
+    ? await c.env.DB.prepare('SELECT * FROM sessions WHERE tidal_user_id = ? ORDER BY updated_at DESC LIMIT 1')
+        .bind(shared.owner_tidal_user_id).first()
+    : null;
   if (!ownerSession) {
-    console.error(`[manualSync] Owner session ${shared.owner_session_id} not found`);
+    ownerSession = await c.env.DB.prepare('SELECT * FROM sessions WHERE id = ?')
+      .bind(shared.owner_session_id).first();
+  }
+  if (!ownerSession) {
+    console.error(`[manualSync] Owner session not found for share ${shareId}`);
     return c.json({ error: 'Owner session expired' }, 400);
   }
 
-  console.log(`[manualSync] Owner session found, querying members...`);
+  console.log(`[manualSync] Owner session found (${ownerSession.id}), querying members...`);
 
-  // Get all members for bidirectional sync
-  const members = await c.env.DB.prepare(
-    `SELECT pm.session_id, pm.their_playlist_id,
-            s.id as s_id, s.tidal_user_id, s.access_token, s.refresh_token,
-            s.token_expires_at, s.created_at as s_created_at, s.updated_at as s_updated_at
-     FROM playlist_members pm
-     JOIN sessions s ON pm.session_id = s.id
-     WHERE pm.shared_playlist_id = ?`,
+  // Get all members and find their most recent session
+  const memberRows = await c.env.DB.prepare(
+    'SELECT session_id, their_playlist_id, tidal_user_id FROM playlist_members WHERE shared_playlist_id = ?',
   )
     .bind(shareId)
     .all();
 
-  const memberEntries = members.results
+  const memberEntryPromises = memberRows.results
     .filter((m) => m.their_playlist_id)
-    .map((m) => ({
-      session: {
-        id: m.s_id,
-        tidal_user_id: m.tidal_user_id,
-        access_token: m.access_token,
-        refresh_token: m.refresh_token,
-        token_expires_at: m.token_expires_at,
-        created_at: m.s_created_at,
-        updated_at: m.s_updated_at,
-      } as Record<string, unknown>,
-      playlistId: m.their_playlist_id as string,
-    }));
+    .map(async (m) => {
+      // Find best session: by tidal_user_id (latest), then by session_id
+      let s = m.tidal_user_id
+        ? await c.env.DB.prepare('SELECT * FROM sessions WHERE tidal_user_id = ? ORDER BY updated_at DESC LIMIT 1')
+            .bind(m.tidal_user_id).first()
+        : null;
+      if (!s) {
+        s = await c.env.DB.prepare('SELECT * FROM sessions WHERE id = ?').bind(m.session_id).first();
+      }
+      if (!s) return null;
+      return {
+        session: s as Record<string, unknown>,
+        playlistId: m.their_playlist_id as string,
+      };
+    });
 
-  console.log(`[manualSync] Found ${members.results.length} member rows, ${memberEntries.length} with playlist IDs`);
+  const resolvedEntries = await Promise.all(memberEntryPromises);
+  const memberEntries = resolvedEntries.filter((e): e is NonNullable<typeof e> => e !== null);
+
+  console.log(`[manualSync] Found ${memberRows.results.length} member rows, ${memberEntries.length} with valid sessions`);
 
   if (memberEntries.length === 0) {
     console.log(`[manualSync] No members to sync, returning early`);
@@ -812,16 +848,22 @@ app.get('/api/my-shares', async (c) => {
   const sessionId = getCookie(c, 'session');
   if (!sessionId) return c.json({ shares: [], memberships: [] });
 
+  const session = await getSession(c.env.DB, sessionId);
+  if (!session) return c.json({ shares: [], memberships: [] });
+
+  const tidalUserId = session.tidal_user_id as string | null;
+
+  // Find shares by tidal_user_id (stable across re-logins) or session_id (legacy fallback)
   const shares = await c.env.DB.prepare(
-    'SELECT * FROM shared_playlists WHERE owner_session_id = ? ORDER BY created_at DESC',
+    'SELECT * FROM shared_playlists WHERE owner_tidal_user_id = ? OR owner_session_id = ? ORDER BY created_at DESC',
   )
-    .bind(sessionId)
+    .bind(tidalUserId, sessionId)
     .all();
 
   const memberships = await c.env.DB.prepare(
-    'SELECT pm.*, sp.name, sp.tidal_playlist_id FROM playlist_members pm JOIN shared_playlists sp ON pm.shared_playlist_id = sp.id WHERE pm.session_id = ? ORDER BY pm.joined_at DESC',
+    'SELECT pm.*, sp.name, sp.tidal_playlist_id FROM playlist_members pm JOIN shared_playlists sp ON pm.shared_playlist_id = sp.id WHERE pm.tidal_user_id = ? OR pm.session_id = ? ORDER BY pm.joined_at DESC',
   )
-    .bind(sessionId)
+    .bind(tidalUserId, sessionId)
     .all();
 
   return c.json({ shares: shares.results, memberships: memberships.results });
