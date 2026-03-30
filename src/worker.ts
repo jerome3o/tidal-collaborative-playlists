@@ -745,6 +745,21 @@ app.post('/api/share/:id/join', async (c) => {
 
   console.log(`[join] Found shared playlist: ${shared.name}, source: ${shared.tidal_playlist_id}`);
 
+  // Check if this user is already a member (by tidal_user_id or session_id)
+  const tidalUserId = session.tidal_user_id as string | null;
+  const existingMember = tidalUserId
+    ? await c.env.DB.prepare(
+        'SELECT * FROM playlist_members WHERE shared_playlist_id = ? AND (tidal_user_id = ? OR session_id = ?)',
+      ).bind(shareId, tidalUserId, sessionId).first()
+    : await c.env.DB.prepare(
+        'SELECT * FROM playlist_members WHERE shared_playlist_id = ? AND session_id = ?',
+      ).bind(shareId, sessionId).first();
+
+  const isRejoin = !!existingMember;
+  if (isRejoin) {
+    console.log(`[join] Re-join detected for member ${existingMember.id}, old playlist: ${existingMember.their_playlist_id}`);
+  }
+
   const accessToken = await refreshAccessToken(
     c.env.DB,
     session as Record<string, unknown>,
@@ -812,14 +827,23 @@ app.post('/api/share/:id/join', async (c) => {
   const theirPlaylistId = createData.data.id;
   console.log(`[join] Created playlist copy: ${theirPlaylistId}`);
 
-  await c.env.DB.prepare(
-    'INSERT OR REPLACE INTO playlist_members (shared_playlist_id, session_id, tidal_user_id, their_playlist_id, joined_at) VALUES (?, ?, ?, ?, ?)',
-  )
-    .bind(shareId, sessionId, session.tidal_user_id, theirPlaylistId, Math.floor(Date.now() / 1000))
-    .run();
+  if (isRejoin) {
+    await c.env.DB.prepare(
+      'UPDATE playlist_members SET session_id = ?, tidal_user_id = ?, their_playlist_id = ?, joined_at = ? WHERE id = ?',
+    )
+      .bind(sessionId, session.tidal_user_id, theirPlaylistId, Math.floor(Date.now() / 1000), existingMember.id)
+      .run();
+    console.log(`[join] Re-joined: updated member ${existingMember.id} with new playlist ${theirPlaylistId}`);
+  } else {
+    await c.env.DB.prepare(
+      'INSERT INTO playlist_members (shared_playlist_id, session_id, tidal_user_id, their_playlist_id, joined_at) VALUES (?, ?, ?, ?, ?)',
+    )
+      .bind(shareId, sessionId, session.tidal_user_id, theirPlaylistId, Math.floor(Date.now() / 1000))
+      .run();
+    console.log(`[join] Member saved: share=${shareId} session=${sessionId} playlist=${theirPlaylistId}`);
+  }
 
-  console.log(`[join] Member saved: share=${shareId} session=${sessionId} playlist=${theirPlaylistId}`);
-  return c.json({ success: true, theirPlaylistId });
+  return c.json({ success: true, theirPlaylistId, rejoin: isRejoin });
 });
 
 // ── Sync endpoint: copy items from source to member playlists ────────
