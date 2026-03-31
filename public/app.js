@@ -311,17 +311,25 @@ async function renderSharedDetail(shareId) {
   const shareUrl = `${window.location.origin}/#/join/${shareId}`;
   const members = data.members || [];
 
+  // Determine which playlist to link to in Tidal:
+  // - If the user is a member, link to their copy
+  // - If the user is the owner, link to the source playlist
+  const myMembership = members.find(m => m.tidal_user_id === state.userId);
+  const isOwner = data.shared.owner_tidal_user_id === state.userId;
+  const myPlaylistId = myMembership?.their_playlist_id || tidalPlaylistId;
+
   let html = `
     <button class="back-btn" onclick="navigate('/')">&larr; Back</button>
     <h2>
-      <a href="https://tidal.com/browse/playlist/${tidalPlaylistId}" target="_blank" style="color: var(--text); text-decoration: none;">
+      <a href="https://tidal.com/browse/playlist/${myPlaylistId}" target="_blank" style="color: var(--text); text-decoration: none;">
         ${escHtml(data.shared.name || 'Shared Playlist')}
       </a>
     </h2>
     <p style="color: var(--text-dim); margin-bottom: 16px;">
-      <a href="https://tidal.com/browse/playlist/${tidalPlaylistId}" target="_blank" class="btn btn-secondary btn-small" style="text-decoration: none;">
+      <a href="https://tidal.com/browse/playlist/${myPlaylistId}" target="_blank" class="btn btn-secondary btn-small" style="text-decoration: none;">
         Open in Tidal
       </a>
+      ${!isOwner && !myMembership ? `<span style="font-size: 0.8rem; margin-left: 8px;">(owner's playlist — join to get your own copy)</span>` : ''}
     </p>
 
     <div class="section-title">Share Link</div>
