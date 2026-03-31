@@ -80,6 +80,9 @@ async function fetchAllPlaylistItems(
     };
 
     const pageItems = body.data || [];
+    if (page === 0 && pageItems.length > 0) {
+      console.log(`[fetchItems] Playlist ${playlistId} sample item: type=${pageItems[0].type} id=${pageItems[0].id}`);
+    }
     console.log(`[fetchItems] Playlist ${playlistId} page ${page}: got ${pageItems.length} items`);
     allItems.push(...pageItems);
 
@@ -108,13 +111,16 @@ async function acquireSyncLock(db: D1Database, shareId: string): Promise<boolean
   )
     .bind(now, shareId, now - SYNC_LOCK_TTL_SECONDS)
     .run();
-  return (result.meta.changes ?? 0) > 0;
+  const acquired = (result.meta.changes ?? 0) > 0;
+  console.log(`[sync] Lock ${acquired ? 'acquired' : 'BLOCKED (another sync in progress)'} for share ${shareId}`);
+  return acquired;
 }
 
 async function releaseSyncLock(db: D1Database, shareId: string): Promise<void> {
   await db.prepare('UPDATE shared_playlists SET sync_started_at = NULL WHERE id = ?')
     .bind(shareId)
     .run();
+  console.log(`[sync] Lock released for share ${shareId}`);
 }
 
 /** Merge items from all playlists (owner + members), then write the union back to all */
@@ -149,8 +155,7 @@ async function syncSharedPlaylist(
       console.log(`[sync] Token refreshed OK for ${entry.label}`);
 
       const items = await fetchAllPlaylistItems(apiBase, entry.playlistId, token);
-      console.log(`[sync] Read ${items.length} items from ${entry.label} playlist ${entry.playlistId}`);
-
+      const uniqueBefore = mergedMap.size;
       for (const item of items) {
         const key = `${item.type}:${item.id}`;
         if (!mergedMap.has(key)) {
@@ -158,6 +163,8 @@ async function syncSharedPlaylist(
           orderedKeys.push(key);
         }
       }
+      const newUnique = mergedMap.size - uniqueBefore;
+      console.log(`[sync] Read ${items.length} items from ${entry.label} playlist ${entry.playlistId} (${newUnique} new unique, ${items.length - newUnique} dupes/overlap)`);
     } catch (e) {
       const errMsg = `Failed to read playlist ${entry.playlistId} for ${entry.label}: ${e}`;
       console.error(`[sync] ${errMsg}`);
@@ -173,9 +180,13 @@ async function syncSharedPlaylist(
     try {
       const token = await refreshAccessToken(db, entry.session, clientId, clientSecret);
 
-      // Read current items in this playlist
+      // Read current items in this playlist (re-read to catch concurrent changes)
       const currentItems = await fetchAllPlaylistItems(apiBase, entry.playlistId, token);
       const currentSet = new Set(currentItems.map((item) => `${item.type}:${item.id}`));
+      const dupesInPlaylist = currentItems.length - currentSet.size;
+      if (dupesInPlaylist > 0) {
+        console.warn(`[sync] ${entry.label} playlist ${entry.playlistId} has ${dupesInPlaylist} duplicate items (${currentItems.length} total, ${currentSet.size} unique)`);
+      }
 
       // Find items that need to be added
       const missingItems = mergedItems.filter((item) => !currentSet.has(`${item.type}:${item.id}`));
@@ -189,7 +200,8 @@ async function syncSharedPlaylist(
       const postBody = JSON.stringify({
         data: missingItems.map((item) => ({ id: item.id, type: item.type })),
       });
-      console.log(`[sync] POST ${postUrl} for ${entry.label}: adding ${missingItems.length} missing items (has ${currentItems.length}, merged total ${mergedItems.length})`);
+      const itemSummary = missingItems.slice(0, 5).map((i) => `${i.type}:${i.id}`).join(', ');
+      console.log(`[sync] POST ${postUrl} for ${entry.label}: adding ${missingItems.length} missing items (has ${currentSet.size} unique/${currentItems.length} total, merged ${mergedItems.length}): [${itemSummary}${missingItems.length > 5 ? ', ...' : ''}]`);
 
       const resp = await fetch(postUrl, {
         method: 'POST',
@@ -1000,6 +1012,7 @@ app.get('/api/my-shares', async (c) => {
     .bind(tidalUserId, sessionId)
     .all();
 
+  console.log(`[my-shares] session=${sessionId?.slice(0, 8)}... tidal_user_id=${tidalUserId} → ${shares.results.length} owned, ${memberships.results.length} memberships`);
   return c.json({ shares: shares.results, memberships: memberships.results });
 });
 
