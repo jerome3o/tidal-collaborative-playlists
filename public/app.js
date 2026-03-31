@@ -198,9 +198,23 @@ async function renderPlaylistDetail(playlistId) {
   }
   let items;
   if (orderedIds.length > 0) {
-    items = orderedIds.map((key) => resourceMap[key]).filter(Boolean);
+    const seen = new Set();
+    items = orderedIds.map((key) => resourceMap[key]).filter((item) => {
+      if (!item) return false;
+      const uid = `${item.type}:${item.id}`;
+      if (seen.has(uid)) return false;
+      seen.add(uid);
+      return true;
+    });
   } else {
-    items = included.filter((r) => r.type === 'tracks' || r.type === 'videos');
+    const seen = new Set();
+    items = included.filter((r) => {
+      if (r.type !== 'tracks' && r.type !== 'videos') return false;
+      const uid = `${r.type}:${r.id}`;
+      if (seen.has(uid)) return false;
+      seen.add(uid);
+      return true;
+    });
   }
 
   let html = `
@@ -426,9 +440,23 @@ async function loadSharedPlaylistTracks(tidalPlaylistId, shareId) {
 
   let items;
   if (orderedIds.length > 0) {
-    items = orderedIds.map((key) => resourceMap[key]).filter(Boolean);
+    const seen = new Set();
+    items = orderedIds.map((key) => resourceMap[key]).filter((item) => {
+      if (!item) return false;
+      const uid = `${item.type}:${item.id}`;
+      if (seen.has(uid)) return false;
+      seen.add(uid);
+      return true;
+    });
   } else {
-    items = included.filter((r) => r.type === 'tracks' || r.type === 'videos');
+    const seen = new Set();
+    items = included.filter((r) => {
+      if (r.type !== 'tracks' && r.type !== 'videos') return false;
+      const uid = `${r.type}:${r.id}`;
+      if (seen.has(uid)) return false;
+      seen.add(uid);
+      return true;
+    });
   }
 
   if (items.length === 0) {

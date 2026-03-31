@@ -97,6 +97,26 @@ async function fetchAllPlaylistItems(
   return allItems;
 }
 
+const SYNC_LOCK_TTL_SECONDS = 60; // Lock expires after 60s to prevent deadlocks
+
+/** Try to acquire a sync lock for a shared playlist. Returns true if acquired. */
+async function acquireSyncLock(db: D1Database, shareId: string): Promise<boolean> {
+  const now = Math.floor(Date.now() / 1000);
+  // Only acquire if no lock or lock has expired
+  const result = await db.prepare(
+    'UPDATE shared_playlists SET sync_started_at = ? WHERE id = ? AND (sync_started_at IS NULL OR sync_started_at < ?)',
+  )
+    .bind(now, shareId, now - SYNC_LOCK_TTL_SECONDS)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+async function releaseSyncLock(db: D1Database, shareId: string): Promise<void> {
+  await db.prepare('UPDATE shared_playlists SET sync_started_at = NULL WHERE id = ?')
+    .bind(shareId)
+    .run();
+}
+
 /** Merge items from all playlists (owner + members), then write the union back to all */
 async function syncSharedPlaylist(
   db: D1Database,
@@ -185,6 +205,9 @@ async function syncSharedPlaylist(
         const err = await resp.text();
         if (resp.status === 404) {
           console.warn(`[sync] Playlist ${entry.playlistId} for ${entry.label} not found (404) — skipping (may have been deleted from Tidal)`);
+        } else if (resp.status === 429) {
+          const retryAfter = resp.headers.get('retry-after') || '?';
+          console.warn(`[sync] Rate limited (429) adding to playlist ${entry.playlistId} for ${entry.label}, retry-after: ${retryAfter}s — will retry next sync cycle`);
         } else {
           const errMsg = `Failed to add items to playlist ${entry.playlistId} for ${entry.label}: HTTP ${resp.status} ${err}`;
           console.error(`[sync] ${errMsg}`);
@@ -259,21 +282,30 @@ async function syncAllPlaylists(
         playlistId: m.their_playlist_id as string,
       }));
 
-    const result = await syncSharedPlaylist(
-      db,
-      apiBase,
-      clientId,
-      clientSecret,
-      shared as Record<string, unknown>,
-      ownerSession as Record<string, unknown>,
-      memberEntries,
-    );
+    if (!await acquireSyncLock(db, shared.id as string)) {
+      console.log(`[sync] Sync already in progress for ${shared.id}, skipping`);
+      continue;
+    }
 
-    if (result.success) {
-      synced++;
-    } else {
-      failed++;
-      errors.push(...result.errors);
+    try {
+      const result = await syncSharedPlaylist(
+        db,
+        apiBase,
+        clientId,
+        clientSecret,
+        shared as Record<string, unknown>,
+        ownerSession as Record<string, unknown>,
+        memberEntries,
+      );
+
+      if (result.success) {
+        synced++;
+      } else {
+        failed++;
+        errors.push(...result.errors);
+      }
+    } finally {
+      await releaseSyncLock(db, shared.id as string);
     }
   }
 
@@ -918,21 +950,30 @@ app.post('/api/share/:id/sync', async (c) => {
     return c.json({ success: true, itemCount: 0, message: 'No members to sync yet' });
   }
 
-  const result = await syncSharedPlaylist(
-    c.env.DB,
-    c.env.TIDAL_API_BASE,
-    c.env.TIDAL_CLIENT_ID,
-    c.env.TIDAL_CLIENT_SECRET,
-    shared as Record<string, unknown>,
-    ownerSession as Record<string, unknown>,
-    memberEntries,
-  );
-
-  if (!result.success) {
-    return c.json({ error: 'Sync had errors', details: result.errors }, 500);
+  if (!await acquireSyncLock(c.env.DB, shareId)) {
+    console.log(`[manualSync] Sync already in progress for ${shareId}, skipping`);
+    return c.json({ success: true, itemCount: 0, message: 'Sync already in progress' });
   }
 
-  return c.json({ success: true, itemCount: result.itemCount });
+  try {
+    const result = await syncSharedPlaylist(
+      c.env.DB,
+      c.env.TIDAL_API_BASE,
+      c.env.TIDAL_CLIENT_ID,
+      c.env.TIDAL_CLIENT_SECRET,
+      shared as Record<string, unknown>,
+      ownerSession as Record<string, unknown>,
+      memberEntries,
+    );
+
+    if (!result.success) {
+      return c.json({ error: 'Sync had errors', details: result.errors }, 500);
+    }
+
+    return c.json({ success: true, itemCount: result.itemCount });
+  } finally {
+    await releaseSyncLock(c.env.DB, shareId);
+  }
 });
 
 // ── My shared playlists ──────────────────────────────────────────────
