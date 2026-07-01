@@ -15,7 +15,9 @@ PWA that lets Tidal users share playlists and sync them bidirectionally. Hosted 
 Single Cloudflare Worker (Hono framework) serves both the API and static frontend.
 
 ```
-src/worker.ts     — All backend logic: OAuth, API proxy, sync, reactions, comments
+src/worker.ts     — Web app routes: Tidal OAuth, API proxy, shares, sync, reactions, comments
+src/tidal.ts      — Shared helpers: token refresh, playlist item fetching, sync engine
+src/mcp.ts        — Remote MCP server + its OAuth 2.1 authorization server
 public/           — Static frontend (vanilla JS PWA, no build step)
   app.js          — SPA router, all UI rendering
   style.css       — Dark theme styles
@@ -56,6 +58,7 @@ D1 SQLite with these tables:
 - `reactions` — emoji reactions per track per user (toggle)
 - `comments` — threaded comments per track
 - `pkce_state` — temporary PKCE verifiers during OAuth flow
+- `mcp_clients` / `mcp_auth_requests` / `mcp_auth_codes` / `mcp_tokens` — MCP OAuth (dynamic client registration, consent requests, hashed access/refresh tokens)
 
 Migrations in `migrations/` are run in filename order by the deploy workflow before deploying.
 
@@ -65,6 +68,18 @@ Migrations in `migrations/` are run in filename order by the deploy workflow bef
 - **Setup**: `.github/workflows/setup.yml` (manual dispatch) creates D1 DB, runs schema, sets secrets
 - **Secrets needed**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `TIDAL_CLIENT_ID`, `TIDAL_CLIENT_SECRET` in GitHub Actions
 - **Tidal dashboard**: redirect URI must be `https://tidal-collaborative-playlists.jeromeswannack.workers.dev/auth/callback`
+
+## Remote MCP Server (for end users' AI agents)
+
+The worker doubles as a remote MCP server so users can connect Claude (or any MCP client) to their Tidal account. Implemented in `src/mcp.ts`:
+
+- **Endpoint**: `https://<worker>/mcp` — stateless Streamable HTTP (POST JSON-RPC, JSON responses; GET returns 405; no sessions, no SSE)
+- **Auth**: full OAuth 2.1 authorization server — RFC 9728/8414 discovery under `/.well-known/`, RFC 7591 dynamic client registration at `/mcp/register`, PKCE-S256 authorize + consent page at `/mcp/authorize` (requires the app's session cookie; bounces through `/auth/login?redirect=…` when logged out), token endpoint at `/mcp/token` with refresh token rotation
+- **Identity bridge**: MCP tokens are bound to `tidal_user_id`; tool calls resolve the user's most recent D1 session and reuse `refreshAccessToken()`. Tidal tokens are never sent to MCP clients.
+- **Scopes**: `playlists:read`, `playlists:write`, `shares:read`, `shares:write` — enforced per tool
+- **Tools** (14): whoami, list_playlists, get_playlist, search_tracks, create_playlist, add/remove_tracks_to/from_playlist, list/get_shared_playlist(s), create_share_link, sync_shared_playlist, react_to_track, comment_on_track, get_track_comments
+- **Logs**: `[mcp]` and `[mcp-oauth]` prefixes; cron cleans expired OAuth rows
+- **Connecting from claude.ai**: Settings → Connectors → Add custom connector → paste the `/mcp` URL
 
 ## MCP Tools
 

@@ -177,6 +177,21 @@ async function renderHome() {
     html += '<p style="color: var(--text-dim); padding: 12px 0;">Could not load playlists. The API may require a different country code.</p>';
   }
 
+  // MCP connector info
+  const mcpUrl = `${location.origin}/mcp`;
+  html += `
+    <div class="section-title">Connect your AI</div>
+    <div class="card" style="cursor: default;">
+      <h3>MCP server for AI agents 🤖</h3>
+      <p>Let Claude (or any MCP client) search Tidal, build playlists, and manage your collaborative playlists.</p>
+      <p style="margin-top: 8px;">
+        <code style="background: rgba(255,255,255,0.08); padding: 4px 8px; border-radius: 6px; user-select: all;">${escHtml(mcpUrl)}</code>
+        <button class="btn" style="margin-left: 8px;" onclick="navigator.clipboard.writeText('${mcpUrl}'); this.textContent='Copied!'">Copy</button>
+      </p>
+      <p style="color: var(--text-dim); margin-top: 8px;">In claude.ai: Settings → Connectors → Add custom connector, paste the URL, then approve access when prompted. You'll log in with this Tidal account.</p>
+    </div>
+  `;
+
   main().innerHTML = html;
 }
 
